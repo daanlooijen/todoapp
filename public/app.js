@@ -3,8 +3,10 @@
 // "<img onerror=...>" is shown as text instead of running as code.
 import { addDays, dueLabel, fmtDate, parseDate } from '/shared/dates.js';
 import { parseQuickAdd } from '/shared/quickadd.js';
+import { icon } from '/icons.js';
 
 const $ = (s, el = document) => el.querySelector(s);
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -28,6 +30,10 @@ const dot = (color) => {
 };
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
 const spinner = () => h('span', { class: 'spinner', 'aria-hidden': 'true' });
+const loading = (text) => h('p', { class: 'loading-line', role: 'status' }, spinner(), text);
+const note = (text) => h('p', { class: 'note', role: 'alert' }, icon('alert', { size: 14 }), h('span', {}, text));
+let uid = 0;
+const nextId = (prefix) => `${prefix}-${++uid}`;
 
 async function api(method, url, body) {
   const res = await fetch(`/api${url}`, {
@@ -51,7 +57,8 @@ let toastTimer;
 function toast(message, actionLabel, action, { error = false } = {}) {
   const el = $('#toast');
   el.className = `toast show${error ? ' error' : ''}`;
-  el.replaceChildren(h('span', {}, message));
+  el.setAttribute('role', error ? 'alert' : 'status');
+  el.replaceChildren(icon(error ? 'alert' : 'check', { size: 16 }), h('span', {}, message));
   if (actionLabel) {
     el.append(h('button', {
       onclick: async () => {
@@ -67,17 +74,33 @@ const showError = (e) => toast(e.message || String(e), null, null, { error: true
 
 // ---------- modal ----------
 
-function modal(...children) {
-  const box = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true' }, ...children);
+// Dialog with a focus trap: Tab cycles inside it, Esc closes it, and focus returns to
+// whatever opened it, so keyboard and screen reader users never get lost behind the scrim.
+function modal(title, ...children) {
+  const titleId = nextId('dialog-title');
+  const box = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
+    h('h2', { id: titleId }, title), ...children);
   const back = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === back) close(); } }, box);
-  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  const opener = document.activeElement;
+  const focusables = () => [...box.querySelectorAll('button:not(:disabled), input, textarea, select, [href]')];
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
+    if (e.key !== 'Tab') return;
+    const list = focusables();
+    if (!list.length) return;
+    const first = list[0];
+    const last = list[list.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
   function close() {
     back.remove();
     document.removeEventListener('keydown', onKey, true);
+    if (opener?.isConnected) opener.focus();
   }
   document.addEventListener('keydown', onKey, true);
   $('#modal-root').append(back);
-  box.querySelector('textarea, input')?.focus();
+  (box.querySelector('textarea, input') ?? focusables()[0])?.focus();
   return { close, box };
 }
 
@@ -87,17 +110,22 @@ function formModal({ title, lead, fields, submitLabel = 'Save', onSubmit }) {
   const rows = fields.map((f) => {
     if (f.type === 'color') {
       color = f.value || 'slate';
-      const sw = h('div', { class: 'swatches' });
+      const labelId = nextId('color-label');
+      const sw = h('div', { class: 'swatches', role: 'radiogroup', 'aria-labelledby': labelId });
       const draw = () => sw.replaceChildren(...state.boot.colors.map((c) => {
-        const b = h('button', { type: 'button', class: c === color ? 'on' : '', title: c, 'aria-label': c, onclick: () => { color = c; draw(); } });
+        const b = h('button', {
+          type: 'button', role: 'radio', 'aria-checked': String(c === color), title: c, 'aria-label': c,
+          onclick: () => { color = c; draw(); sw.querySelector('[aria-checked="true"]')?.focus(); },
+        });
         b.style.background = `var(--c-${c})`;
         return b;
       }));
       draw();
-      return h('div', { class: 'row' }, sw);
+      return h('div', { class: 'row' }, h('span', { class: 'field-label', id: labelId }, 'Color'), sw);
     }
-    inputs[f.name] = h('input', { type: 'text', value: f.value ?? '', placeholder: f.placeholder ?? f.label, 'aria-label': f.label });
-    return h('div', { class: 'row' }, inputs[f.name]);
+    const id = nextId('field');
+    inputs[f.name] = h('input', { type: 'text', id, value: f.value ?? '', placeholder: f.placeholder ?? '', required: f.required ?? false });
+    return h('div', { class: 'row' }, h('label', { class: 'field-label', for: id }, f.label), inputs[f.name]);
   });
   const submit = h('button', { class: 'btn primary', type: 'submit' }, submitLabel);
   const form = h('form', {
@@ -112,45 +140,49 @@ function formModal({ title, lead, fields, submitLabel = 'Save', onSubmit }) {
       } catch (err) { showError(err); } finally { submit.disabled = false; }
     },
   }, ...rows, h('div', { class: 'modal-actions' }, h('button', { type: 'button', class: 'btn', onclick: () => m.close() }, 'Cancel'), submit));
-  const m = modal(h('h2', {}, title), lead ? h('p', { class: 'lead' }, lead) : null, form);
+  const m = modal(title, lead ? h('p', { class: 'lead' }, lead) : null, form);
   return m;
 }
 
 // ---------- sidebar ----------
 
-function navLink(href, ico, label, count, { alert = false, color } = {}) {
+function navLink(href, ico, label, count, { alert = false, color, countLabel } = {}) {
   const active = location.hash === href || (href === '#/today' && !location.hash);
-  return h('a', { href, class: active ? 'active' : '' },
-    color ? dot(color) : h('span', { class: 'ico', 'aria-hidden': 'true' }, ico),
-    h('span', {}, label),
-    count ? h('span', { class: `count${alert ? ' alert' : ''}` }, count) : null);
+  return h('a', { href, class: active ? 'active' : '', 'aria-current': active ? 'page' : null },
+    color ? dot(color) : h('span', { class: 'ico' }, icon(ico, { size: 16 })),
+    h('span', { class: 'label' }, label),
+    count ? h('span', { class: `count${alert ? ' alert' : ''}`, 'aria-label': countLabel ?? `${count} open` }, count) : null);
 }
 
 function renderSidebar() {
   const { projects, labels, counts, ai, data_dir, backup } = state.boot;
   const inbox = projects.find((p) => p.is_inbox);
-  $('#nav-main').replaceChildren(
-    navLink(`#/inbox`, '▤', 'Inbox', inbox?.active_count),
-    navLink('#/today', '☀', 'Today', counts.overdue + counts.due_today, { alert: counts.overdue > 0 }),
-    navLink('#/upcoming', '◷', 'Upcoming'),
-    navLink('#/completed', '✓', 'Completed'),
+  const dueCount = counts.overdue + counts.due_today;
+  fill($('#nav-main'),
+    navLink('#/inbox', 'inbox', 'Inbox', inbox?.active_count),
+    navLink('#/today', 'sun', 'Today', dueCount, {
+      alert: counts.overdue > 0,
+      countLabel: counts.overdue ? `${dueCount} due, ${counts.overdue} overdue` : `${dueCount} due`,
+    }),
+    navLink('#/upcoming', 'calendar', 'Upcoming'),
+    navLink('#/completed', 'done', 'Completed'),
   );
-  $('#nav-projects').replaceChildren(...projects.filter((p) => !p.is_inbox).map((p) =>
+  fill($('#nav-projects'), ...projects.filter((p) => !p.is_inbox).map((p) =>
     navLink(`#/project/${p.id}`, '', p.name, p.active_count, { color: p.color })));
-  $('#nav-labels').replaceChildren(...labels.filter((l) => l.active_count > 0).map((l) =>
-    navLink(`#/label/${encodeURIComponent(l.name)}`, '@', l.name, l.active_count)));
+  fill($('#nav-labels'), ...labels.filter((l) => l.active_count > 0).map((l) =>
+    navLink(`#/label/${encodeURIComponent(l.name)}`, 'tag', l.name, l.active_count)));
   $('#nav-labels').previousElementSibling.hidden = !labels.some((l) => l.active_count > 0);
-  $('#nav-tools').replaceChildren(
-    navLink('#/memory', '✦', 'Memory'),
-    navLink('#/activity', '↺', 'Activity'),
-    navLink('#/trash', '✗', 'Trash'),
-    h('a', { href: '/api/export', download: '' }, h('span', { class: 'ico' }, '⤓'), h('span', {}, 'Export JSON')),
+  fill($('#nav-tools'),
+    navLink('#/memory', 'sparkles', 'Memory'),
+    navLink('#/activity', 'history', 'Activity'),
+    navLink('#/trash', 'trash', 'Trash'),
+    h('a', { href: '/api/export', download: '' }, h('span', { class: 'ico' }, icon('download', { size: 16 })), h('span', { class: 'label' }, 'Export JSON')),
   );
-  const last = backup?.at ? new Date(backup.at).toLocaleString() : 'pending';
-  $('#status').replaceChildren(
+  const last = backup?.at ? new Date(backup.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'pending';
+  fill($('#status'),
     h('div', {}, h('b', {}, 'AI: '), ai.configured ? h('span', { class: 'on' }, `on (${ai.model})`) : 'off, add ANTHROPIC_API_KEY to .env'),
     h('div', {}, h('b', {}, 'Data: '), data_dir),
-    h('div', {}, h('b', {}, 'Backup: '), backup?.ok === false ? `failed (${backup.error})` : last),
+    h('div', {}, h('b', {}, 'Backup: '), backup?.ok === false ? h('span', { class: 'bad' }, `failed (${backup.error})`) : last),
   );
 }
 
@@ -171,19 +203,28 @@ function taskRow(t, depth = 0, { showProject = true } = {}) {
     onclick: () => openTask(t.id),
     onkeydown: (e) => { if (e.key === 'Enter' && e.target === row) openTask(t.id); },
   });
-  if (depth) row.style.paddingLeft = `${4 + depth * 28}px`;
+  if (depth) row.style.paddingLeft = `${6 + depth * 32}px`;
   const check = h('button', {
     class: `check p${t.priority}${done ? ' checked' : ''}`,
-    'aria-label': done ? 'Mark as not done' : 'Complete task',
+    'aria-label': done ? `Mark "${t.content}" as not done` : `Complete "${t.content}"`,
+    'aria-pressed': String(done),
     onclick: (e) => { e.stopPropagation(); toggleComplete(t, check); },
-  });
+  }, icon('check', { size: 12 }));
   const meta = h('div', { class: 'meta' });
-  if (t.due_date) meta.append(h('span', { class: `due ${dueClass(t.due_date)}` }, dueLabel(t.due_date), t.due_time ? ` ${t.due_time}` : '', t.recurrence ? ' ↻' : ''));
-  if (t.deadline) meta.append(h('span', { title: 'Deadline' }, `⚑ ${dueLabel(t.deadline)}`));
-  if (t.subtask_count) meta.append(h('span', { title: 'Subtasks' }, `☑ ${t.subtask_done}/${t.subtask_count}`));
-  if (t.comment_count) meta.append(h('span', { title: 'Comments' }, `✎ ${t.comment_count}`));
+  if (t.due_date) {
+    const cls = dueClass(t.due_date);
+    meta.append(h('span', { class: `due ${cls}` },
+      icon(t.recurrence ? 'repeat' : 'calendar', { size: 12 }),
+      cls === 'overdue' ? h('span', { class: 'sr-only' }, 'Overdue: ') : null,
+      dueLabel(t.due_date), t.due_time ? ` ${t.due_time}` : '',
+      t.recurrence ? h('span', { class: 'sr-only' }, `, repeats ${t.recurrence}`) : null));
+  }
+  if (t.priority < 4) meta.append(h('span', { class: `prio p${t.priority}`, title: `Priority ${t.priority}` }, icon('flag', { size: 12 }), `P${t.priority}`));
+  if (t.deadline) meta.append(h('span', { title: 'Deadline' }, icon('flag', { size: 12 }), `Deadline ${dueLabel(t.deadline)}`));
+  if (t.subtask_count) meta.append(h('span', { title: 'Subtasks done' }, icon('subtasks', { size: 12 }), `${t.subtask_done}/${t.subtask_count}`));
+  if (t.comment_count) meta.append(h('span', { title: 'Comments' }, icon('comment', { size: 12 }), String(t.comment_count)));
   for (const l of t.labels) meta.append(h('span', {}, `@${l}`));
-  if (showProject) meta.append(h('span', { class: 'proj' }, t.project_name + (t.section_name ? ` / ${t.section_name}` : ''), dot(t.project_color)));
+  if (showProject) meta.append(h('span', { class: 'proj' }, dot(t.project_color), t.project_name + (t.section_name ? ` / ${t.section_name}` : '')));
   row.append(check, h('div', { class: 'task-body' },
     h('div', { class: 'task-title' }, t.content),
     t.description ? h('div', { class: 'task-desc' }, t.description.split('\n')[0]) : null,
@@ -198,6 +239,9 @@ async function toggleComplete(t, check) {
       return refresh();
     }
     check?.classList.add('checked');
+    // Recurring tasks stay in the list with a new date, so only one-off tasks fold away.
+    const row = check?.closest('.task');
+    if (row && !t.recurrence) row.classList.add('completing');
     const res = await api('POST', `/tasks/${t.id}/complete`);
     if (t.recurrence) {
       toast(`Done. Next: ${dueLabel(res.due_date)}`, 'Undo', async () => {
@@ -210,9 +254,11 @@ async function toggleComplete(t, check) {
         refresh();
       });
     }
-    setTimeout(refresh, 180);
+    // Let the completion animation play out before the list re-renders.
+    setTimeout(refresh, reducedMotion.matches ? 0 : 440);
   } catch (e) {
     check?.classList.remove('checked');
+    check?.closest('.task')?.classList.remove('completing');
     showError(e);
   }
 }
@@ -240,7 +286,7 @@ function group(title, { sub, cls, actions = [] } = {}, ...rows) {
 
 // A small "Add task" line inside a group (a section or a day), using quick-add syntax.
 function inlineAdd(defaults, placeholder = 'Add task') {
-  const input = h('input', { placeholder: `+ ${placeholder}`, 'aria-label': placeholder });
+  const input = h('input', { placeholder, 'aria-label': placeholder });
   return h('form', {
     class: 'inline-add',
     onsubmit: async (e) => {
@@ -253,11 +299,21 @@ function inlineAdd(defaults, placeholder = 'Add task') {
         input.focus();
       } catch (err) { showError(err); }
     },
-  }, input);
+  }, icon('plus', { size: 16 }), input);
 }
 
-function empty(icon, ...lines) {
-  return h('div', { class: 'empty' }, h('div', { class: 'big', 'aria-hidden': 'true' }, icon), ...lines.map((l) => h('p', {}, l)));
+function empty(iconName, title, ...lines) {
+  return h('div', { class: 'empty' },
+    h('div', { class: 'big' }, icon(iconName, { size: 24 })),
+    h('p', { class: 'lead-line' }, title),
+    ...lines.map((l) => h('p', {}, l)));
+}
+
+function skeleton(rows = 4) {
+  return h('div', { class: 'group', 'aria-busy': 'true', 'aria-label': 'Loading tasks' },
+    ...Array.from({ length: rows }, (_, i) => h('div', { class: 'skeleton-row' },
+      h('span', { class: 'sk-circle' }),
+      h('span', { class: 'sk-lines' }, h('span', { class: 'sk-line', style: null }), i % 2 ? null : h('span', { class: 'sk-line short' })))));
 }
 
 // ---------- quick add ----------
@@ -304,47 +360,51 @@ function renderPreview() {
   if (!text.trim()) return box.replaceChildren();
   const { body, parsed } = quickPayload(text, routeDefaults());
   const chips = [];
-  if (body.due_date) chips.push(h('span', { class: 'chip date' }, `◷ ${dueLabel(body.due_date)}${body.due_time ? ` ${body.due_time}` : ''}`));
-  if (body.recurrence) chips.push(h('span', { class: 'chip date' }, `↻ ${body.recurrence}`));
+  if (body.due_date) chips.push(h('span', { class: 'chip date' }, icon('calendar', { size: 12 }), `${dueLabel(body.due_date)}${body.due_time ? ` ${body.due_time}` : ''}`));
+  if (body.recurrence) chips.push(h('span', { class: 'chip date' }, icon('repeat', { size: 12 }), body.recurrence));
   const proj = body.project_id && projectById(body.project_id);
   if (proj) chips.push(h('span', { class: 'chip' }, dot(proj.color), proj.name));
-  for (const l of body.labels) chips.push(h('span', { class: 'chip' }, `@${l}`));
-  if (body.priority < 4) chips.push(h('span', { class: `chip p${body.priority}` }, `P${body.priority}`));
-  if (body.description) chips.push(h('span', { class: 'chip' }, '✎ note'));
+  for (const l of body.labels) chips.push(h('span', { class: 'chip' }, icon('tag', { size: 12 }), l));
+  if (body.priority < 4) chips.push(h('span', { class: `chip p${body.priority}` }, icon('flag', { size: 12 }), `P${body.priority}`));
+  if (body.description) chips.push(h('span', { class: 'chip' }, icon('note', { size: 12 }), 'Note'));
   const unknown = parsed.content.match(/(?:^|\s)#([\p{L}\p{N}_-]+)/u);
-  if (unknown) chips.push(h('span', { class: 'chip warn' }, `No project "${unknown[1]}"`));
+  if (unknown) chips.push(h('span', { class: 'chip warn' }, icon('alert', { size: 12 }), `No project "${unknown[1]}", it stays in the title`));
   box.replaceChildren(...chips);
 }
 
 // ---------- AI: smart add & plan ----------
 
 function openSmartAdd() {
-  const ta = h('textarea', { placeholder: 'Paste or type anything: a brain dump, meeting notes, an email...\n\ne.g. "need to renew passport before march, call the plumber tmrw about the leak, and every friday send the weekly update to Sanne"' });
+  const taId = nextId('smart-text');
+  const ta = h('textarea', { id: taId, placeholder: 'e.g. "renew passport before march, call the plumber tmrw about the leak, and every friday send the weekly update to Sanne"' });
   ta.value = $('#quick-input').value;
-  const out = h('div');
-  const go = h('button', { class: 'btn ai', type: 'button', onclick: run }, 'Organize');
+  const out = h('div', { 'aria-live': 'polite' });
+  const go = h('button', { class: 'btn ai', type: 'button', onclick: run }, icon('sparkles', { size: 15 }), 'Organize');
   const actions = h('div', { class: 'modal-actions' }, h('button', { class: 'btn', type: 'button', onclick: () => m.close() }, 'Cancel'), go);
-  const m = modal(
-    h('h2', {}, 'Smart add'),
+  const m = modal('Smart add',
     h('p', { class: 'lead' }, 'Claude turns messy text into tasks with dates, projects and labels. You review everything before it is added.'),
-    ta, out, actions,
+    h('label', { class: 'field-label', for: taId }, 'Your notes'),
+    ta,
+    h('div', { class: 'hint' }, 'Paste a brain dump, meeting notes or an email. Ctrl/Cmd + Enter to organize.'),
+    out, actions,
   );
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) run(); });
 
   async function run() {
-    if (!ta.value.trim()) return;
+    if (!ta.value.trim()) { ta.focus(); return; }
     go.disabled = true;
-    fill(out, h('p', {}, spinner(), ' Reading your notes...'));
+    go.setAttribute('aria-busy', 'true');
+    fill(out, loading('Reading your notes...'));
     try {
       const { tasks } = await api('POST', '/ai/capture', { text: ta.value });
       showProposals(tasks);
     } catch (e) {
-      fill(out, h('p', { class: 'note' }, e.message));
-    } finally { go.disabled = false; }
+      fill(out, note(e.message));
+    } finally { go.disabled = false; go.removeAttribute('aria-busy'); }
   }
 
   function showProposals(tasks) {
-    if (!tasks.length) return fill(out, h('p', { class: 'note' }, 'No tasks found in that text.'));
+    if (!tasks.length) return fill(out, note('No tasks found in that text. Try adding a bit more detail.'));
     const picks = tasks.map(() => true);
     fill(out, h('div', { class: 'section-title' }, `${tasks.length} proposed task${tasks.length > 1 ? 's' : ''}`),
       ...tasks.map((t, i) => {
@@ -354,11 +414,11 @@ function openSmartAdd() {
           h('div', {},
             h('div', {}, t.content),
             h('div', { class: 'meta' },
-              t.due_date ? h('span', { class: `due ${dueClass(t.due_date)}` }, dueLabel(t.due_date), t.due_time ? ` ${t.due_time}` : '') : null,
-              t.recurrence ? h('span', {}, `↻ ${t.recurrence}`) : null,
-              t.priority < 4 ? h('span', { class: `chip p${t.priority}` }, `P${t.priority}`) : null,
+              t.due_date ? h('span', { class: `due ${dueClass(t.due_date)}` }, icon('calendar', { size: 12 }), dueLabel(t.due_date), t.due_time ? ` ${t.due_time}` : '') : null,
+              t.recurrence ? h('span', {}, icon('repeat', { size: 12 }), t.recurrence) : null,
+              t.priority < 4 ? h('span', { class: `prio p${t.priority}` }, icon('flag', { size: 12 }), `P${t.priority}`) : null,
               ...t.labels.map((l) => h('span', {}, `@${l}`)),
-              h('span', { class: 'proj' }, proj?.name ?? 'Inbox', dot(proj?.color ?? 'blue'))),
+              h('span', { class: 'proj' }, dot(proj?.color ?? 'blue'), proj?.name ?? 'Inbox')),
             t.description ? h('div', { class: 'task-desc' }, t.description) : null,
             t.subtasks.length ? h('div', { class: 'subs' }, ...t.subtasks.map((s) => h('div', {}, `• ${s}`))) : null));
       }));
@@ -387,14 +447,14 @@ function openSmartAdd() {
 }
 
 async function openPlan() {
-  const out = h('div', {}, h('p', {}, spinner(), ' Looking at your week...'));
+  const out = h('div', { 'aria-live': 'polite' }, loading('Looking at your week...'));
   const actions = h('div', { class: 'modal-actions' }, h('button', { class: 'btn', type: 'button', onclick: () => m.close() }, 'Close'));
-  const m = modal(h('h2', {}, 'Plan my day'), out, actions);
+  const m = modal('Plan my day', out, actions);
   let plan;
   try {
     plan = await api('POST', '/ai/plan');
   } catch (e) {
-    return fill(out, h('p', { class: 'note' }, e.message));
+    return fill(out, note(e.message));
   }
   const moves = plan.reschedule.map(() => true);
   fill(out, 
@@ -408,8 +468,8 @@ async function openPlan() {
     plan.reschedule.length ? h('div', { class: 'section-title' }, 'Suggested to move') : null,
     ...plan.reschedule.map((r, i) => h('label', { class: 'proposal' },
       h('input', { type: 'checkbox', checked: true, onchange: (e) => { moves[i] = e.target.checked; } }),
-      h('div', {}, h('div', {}, r.task.content, h('span', { class: 'chip date' }, `→ ${dueLabel(r.new_date)}`)), h('div', { class: 'why' }, r.reason)))),
-    ...plan.notes.map((n) => h('div', { class: 'note' }, `⚠ ${n}`)),
+      h('div', {}, h('div', {}, r.task.content, ' ', h('span', { class: 'chip date' }, icon('arrow', { size: 12 }), dueLabel(r.new_date))), h('div', { class: 'why' }, r.reason)))),
+    ...plan.notes.map((n) => note(n)),
   );
   if (plan.reschedule.length) {
     const apply = h('button', {
@@ -462,7 +522,7 @@ async function renderView() {
     if (kind === 'completed') params.set('limit', '200');
     tasks = await api('GET', `/tasks?${params}`);
   } catch (e) {
-    fill(content, empty('?', e.message));
+    fill(content, empty('alert', 'Could not load tasks', e.message));
     return;
   }
 
@@ -473,7 +533,7 @@ async function renderView() {
     const overdue = tasks.filter((x) => x.due_date < t);
     const today = tasks.filter((x) => x.due_date === t);
     setHead('Today', new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }),
-      [h('button', { class: 'btn ai', onclick: openPlan }, 'Plan my day')]);
+      [h('button', { class: 'btn ai', onclick: openPlan }, icon('sparkles', { size: 15 }), 'Plan my day')]);
     if (overdue.length) {
       nodes.push(group('Overdue', {
         cls: 'overdue', sub: String(overdue.length),
@@ -485,11 +545,11 @@ async function renderView() {
               refresh();
             } catch (e) { showError(e); }
           },
-        }, 'Move all to today')],
+        }, icon('arrow', { size: 13 }), 'Move all to today')],
       }, ...overdue.map((x) => taskRow(x))));
     }
     nodes.push(group(overdue.length ? 'Today' : null, { sub: today.length ? String(today.length) : '' }, ...today.map((x) => taskRow(x))));
-    if (!tasks.length) nodes.push(empty('☀', 'Nothing due today.', 'Enjoy it, or pull something forward from Upcoming.'));
+    if (!tasks.length) nodes.push(empty('sun', 'Nothing due today', 'Enjoy it, or pull something forward from Upcoming.'));
   } else if (kind === 'upcoming') {
     setHead('Upcoming', 'Next 14 days');
     const overdue = tasks.filter((x) => x.due_date < t);
@@ -505,37 +565,37 @@ async function renderView() {
   } else if (kind === 'inbox') {
     setHead('Inbox', 'Everything that has no project yet');
     nodes.push(group(null, {}, ...tree(tasks).map(([x, depth]) => taskRow(x, depth, { showProject: false }))));
-    if (!tasks.length) nodes.push(empty('▤', 'Inbox zero.', 'New tasks without a #project land here.'));
+    if (!tasks.length) nodes.push(empty('inbox', 'Inbox zero', 'New tasks without a #project land here.'));
   } else if (kind === 'project') {
     const p = projectById(arg);
-    if (!p) { fill(content, empty('?', 'Project not found.')); return; }
+    if (!p) { fill(content, empty('folder', 'Project not found', 'It may have been archived.')); return; }
     setHead(p.name, `${tasks.length} open task${tasks.length === 1 ? '' : 's'}`, [
-      h('button', { class: 'btn', onclick: () => addSection(p) }, 'Add section'),
-      h('button', { class: 'btn', onclick: () => editProject(p) }, 'Edit'),
-      h('button', { class: 'btn', onclick: () => archiveProject(p) }, 'Archive'),
+      h('button', { class: 'btn', onclick: () => addSection(p) }, icon('plus', { size: 14 }), 'Section'),
+      h('button', { class: 'btn', onclick: () => editProject(p) }, icon('pencil', { size: 14 }), 'Edit'),
+      h('button', { class: 'btn', onclick: () => archiveProject(p) }, icon('archive', { size: 14 }), 'Archive'),
     ]);
     const sections = state.boot.sections.filter((s) => s.project_id === p.id);
     const loose = tasks.filter((x) => !x.section_id);
     nodes.push(group(null, {}, ...tree(loose).map(([x, d]) => taskRow(x, d, { showProject: false }))));
-    if (!tasks.length && !sections.length) nodes.push(empty('○', 'No tasks yet.', 'Add one above, or use Smart add to paste a whole plan.'));
+    if (!tasks.length && !sections.length) nodes.push(empty('folder', 'No tasks yet', 'Add one above, or use Smart add to paste a whole plan.'));
     for (const s of sections) {
       const st = tasks.filter((x) => x.section_id === s.id);
       nodes.push(group(s.name, {
         sub: st.length ? String(st.length) : '',
         actions: [
-          h('button', { class: 'icon-btn', title: 'Rename section', 'aria-label': 'Rename section', onclick: () => renameSection(s) }, '✎'),
-          h('button', { class: 'icon-btn', title: 'Delete section', 'aria-label': 'Delete section', onclick: () => deleteSection(s) }, '×'),
+          h('button', { class: 'icon-btn', title: 'Rename section', 'aria-label': `Rename section ${s.name}`, onclick: () => renameSection(s) }, icon('pencil', { size: 14 })),
+          h('button', { class: 'icon-btn danger', title: 'Delete section', 'aria-label': `Delete section ${s.name}`, onclick: () => deleteSection(s) }, icon('trash', { size: 14 })),
         ],
       }, ...tree(st).map(([x, d]) => taskRow(x, d, { showProject: false })), inlineAdd({ project_id: p.id, section_id: s.id })));
     }
   } else if (kind === 'label') {
     setHead(`@${arg}`, `${tasks.length} open task${tasks.length === 1 ? '' : 's'}`);
     nodes.push(group(null, {}, ...tasks.map((x) => taskRow(x))));
-    if (!tasks.length) nodes.push(empty('@', 'No open tasks with this label.'));
+    if (!tasks.length) nodes.push(empty('tag', 'No open tasks with this label'));
   } else if (kind === 'search') {
     setHead(`Search: "${arg}"`, `${tasks.length} result${tasks.length === 1 ? '' : 's'}`);
     nodes.push(group(null, {}, ...tasks.map((x) => taskRow(x))));
-    if (!tasks.length) nodes.push(empty('⌕', 'No tasks match.'));
+    if (!tasks.length) nodes.push(empty('search', 'No tasks match', 'Search looks at titles and descriptions.'));
   } else if (kind === 'completed') {
     setHead('Completed', 'Most recent first');
     const byDay = new Map();
@@ -545,7 +605,7 @@ async function renderView() {
       byDay.get(d).push(x);
     }
     for (const [d, list] of byDay) nodes.push(group(dueLabel(d), {}, ...list.map((x) => taskRow(x))));
-    if (!tasks.length) nodes.push(empty('✓', 'Nothing completed yet.'));
+    if (!tasks.length) nodes.push(empty('done', 'Nothing completed yet', 'Ticked-off tasks show up here.'));
   } else if (kind === 'trash') {
     setHead('Trash', 'Deleted tasks are kept for 30 days');
     nodes.push(group(null, {}, ...tasks.map((x) => {
@@ -556,10 +616,10 @@ async function renderView() {
           e.stopPropagation();
           try { await api('POST', `/tasks/${x.id}/restore`); toast('Restored'); refresh(); } catch (err) { showError(err); }
         },
-      }, 'Restore'));
+      }, icon('undo', { size: 13 }), 'Restore'));
       return row;
     })));
-    if (!tasks.length) nodes.push(empty('✗', 'Trash is empty.'));
+    if (!tasks.length) nodes.push(empty('trash', 'Trash is empty'));
   } else {
     location.hash = '#/today';
     return;
@@ -582,7 +642,7 @@ async function renderMemory(content) {
         refresh();
       } catch (err) { showError(err); }
     },
-  }, input, cat, h('button', { class: 'btn primary' }, 'Remember'));
+  }, input, cat, h('button', { class: 'btn primary' }, icon('plus', { size: 14 }), 'Remember'));
 
   const byCat = new Map();
   for (const m of items) {
@@ -594,16 +654,16 @@ async function renderMemory(content) {
     ...list.map((m) => h('div', { class: 'memory-item' },
       h('div', { class: 'body' }, m.content),
       m.source !== 'user' ? h('span', { class: `badge ${m.source}` }, m.source === 'mcp' ? 'Claude' : 'AI') : null,
-      h('button', { class: 'icon-btn', title: 'Edit', 'aria-label': 'Edit', onclick: () => formModal({
+      h('button', { class: 'icon-btn', title: 'Edit', 'aria-label': `Edit memory: ${m.content}`, onclick: () => formModal({
         title: 'Edit memory',
         fields: [{ name: 'content', label: 'Memory', value: m.content }, { name: 'category', label: 'Category', value: m.category }],
         onSubmit: async (v) => { await api('PATCH', `/memory/${m.id}`, v); refresh(); },
-      }) }, '✎'),
-      h('button', { class: 'icon-btn', title: 'Forget', 'aria-label': 'Forget', onclick: async () => {
+      }) }, icon('pencil', { size: 14 })),
+      h('button', { class: 'icon-btn danger', title: 'Forget', 'aria-label': `Forget: ${m.content}`, onclick: async () => {
         try { await api('DELETE', `/memory/${m.id}`); refresh(); } catch (err) { showError(err); }
-      } }, '×')))));
+      } }, icon('x', { size: 15 }))))));
   fill(content, h('div', { class: 'card' }, form), ...cards,
-    items.length ? null : empty('✦', 'Nothing remembered yet.', 'Add how you like to work, your rhythms, the people you work with.'));
+    items.length ? null : empty('sparkles', 'Nothing remembered yet', 'Add how you like to work, your rhythms, the people you work with.'));
 }
 
 async function renderActivity(content) {
@@ -613,7 +673,7 @@ async function renderActivity(content) {
   fill(content, h('div', { class: 'card' }, ...items.map((a) => h('div', { class: 'act' },
     h('time', { datetime: a.at }, new Date(a.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })),
     h('span', { class: `badge ${who[a.actor]?.[1] ?? ''}` }, who[a.actor]?.[0] ?? a.actor),
-    h('span', { class: 'what' }, a.summary)))), items.length ? null : empty('↺', 'No activity yet.'));
+    h('span', { class: 'what' }, a.summary)))), items.length ? null : empty('history', 'No activity yet'));
 }
 
 // ---------- project & section actions ----------
@@ -676,20 +736,31 @@ async function deleteSection(s) {
 
 // ---------- task drawer ----------
 
+let drawerOpener = null;
+
 async function openTask(id) {
+  const wasOpen = Boolean(state.openId);
+  if (!wasOpen) drawerOpener = document.activeElement;
   state.openId = id;
   document.querySelectorAll('.task.selected').forEach((el) => el.classList.remove('selected'));
   document.querySelectorAll(`.task[data-id="${CSS.escape(id)}"]`).forEach((el) => el.classList.add('selected'));
   await renderDrawer();
+  // Move keyboard focus into the panel, so Tab continues where the eye goes.
+  $('#drawer [data-fk="close"]')?.focus({ preventScroll: true });
 }
 
 function closeDrawer() {
+  const id = state.openId;
   state.openId = null;
   const d = $('#drawer');
   d.classList.remove('open');
   d.setAttribute('aria-hidden', 'true');
   d.replaceChildren();
   document.querySelectorAll('.task.selected').forEach((el) => el.classList.remove('selected'));
+  // Return focus to the row that opened the panel (or its replacement after a re-render).
+  const target = (drawerOpener?.isConnected && drawerOpener) || (id && $(`.task[data-id="${CSS.escape(id)}"]`));
+  target?.focus?.({ preventScroll: true });
+  drawerOpener = null;
 }
 
 async function patch(id, body) {
@@ -715,98 +786,128 @@ async function renderDrawer() {
     return closeDrawer();
   }
 
-  const title = h('textarea', { rows: 1, 'aria-label': 'Task title', value: t.content });
+  // Re-rendering after a save replaces every control; remember which one had focus so it can be restored.
+  const focusKey = d.contains(document.activeElement) ? document.activeElement.dataset.fk : null;
+  const fid = (k) => `d-${k}`;
+
+  const title = h('textarea', { rows: 1, 'aria-label': 'Task title', value: t.content, 'data-fk': 'title' });
   const fit = () => { title.style.height = 'auto'; title.style.height = `${title.scrollHeight}px`; };
   title.addEventListener('input', fit);
   title.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
   title.addEventListener('blur', () => { if (title.value.trim() && title.value.trim() !== t.content) patch(t.id, { content: title.value.trim() }); });
 
-  const desc = h('textarea', { class: 'd-desc', placeholder: 'Description', 'aria-label': 'Description', value: t.description });
+  const desc = h('textarea', { class: 'd-desc', placeholder: 'Add a description', 'aria-label': 'Description', value: t.description, 'data-fk': 'desc' });
   desc.addEventListener('blur', () => { if (desc.value !== t.description) patch(t.id, { description: desc.value }); });
 
   const dueValue = [t.recurrence || t.due_date, t.due_time].filter(Boolean).join(' ');
-  const due = h('input', { class: 'field-input', value: dueValue, placeholder: 'e.g. friday 3pm, every weekday', 'aria-label': 'Due date' });
+  const due = h('input', { class: 'field-input', id: fid('due'), value: dueValue, placeholder: 'e.g. friday 3pm, every weekday', 'aria-describedby': fid('due-hint'), 'data-fk': 'due' });
   const saveDue = () => { if (due.value.trim() !== dueValue) patch(t.id, { due: due.value.trim() || null }); };
   due.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); due.blur(); } });
   due.addEventListener('blur', saveDue);
+  const dueHint = t.recurrence
+    ? `Repeats ${t.recurrence}. Next: ${dueLabel(t.due_date)}`
+    : t.due_date ? parseDate(t.due_date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'Type a date in plain English';
 
-  const prio = h('div', { class: 'prio-set' }, ...[1, 2, 3, 4].map((n) =>
-    h('button', { class: `p${n}${t.priority === n ? ' on' : ''}`, onclick: () => patch(t.id, { priority: n }) }, `P${n}`)));
+  const prio = h('div', { class: 'prio-set', role: 'group', 'aria-labelledby': fid('prio-label') }, ...[1, 2, 3, 4].map((n) =>
+    h('button', {
+      class: `p${n}`, 'aria-pressed': String(t.priority === n), 'data-fk': `prio${n}`,
+      title: ['', 'Urgent', 'High', 'Medium', 'None'][n],
+      onclick: () => patch(t.id, { priority: n }),
+    }, n < 4 ? icon('flag', { size: 12 }) : null, `P${n}`)));
 
-  const project = h('select', { 'aria-label': 'Project', disabled: Boolean(t.parent_id), onchange: (e) => patch(t.id, { project_id: e.target.value }) },
+  const project = h('select', { id: fid('project'), disabled: Boolean(t.parent_id), 'data-fk': 'project', onchange: (e) => patch(t.id, { project_id: e.target.value }) },
     ...state.boot.projects.map((p) => h('option', { value: p.id, selected: p.id === t.project_id }, p.name)));
   const sections = state.boot.sections.filter((s) => s.project_id === t.project_id);
-  const section = sections.length ? h('select', { 'aria-label': 'Section', disabled: Boolean(t.parent_id), onchange: (e) => patch(t.id, { section_id: e.target.value || null }) },
+  const section = sections.length ? h('select', { 'aria-label': 'Section', disabled: Boolean(t.parent_id), 'data-fk': 'section', onchange: (e) => patch(t.id, { section_id: e.target.value || null }) },
     h('option', { value: '' }, 'No section'),
     ...sections.map((s) => h('option', { value: s.id, selected: s.id === t.section_id }, s.name))) : null;
 
-  const labels = h('input', { class: 'field-input', value: t.labels.join(', '), placeholder: 'comma separated', 'aria-label': 'Labels' });
+  const labels = h('input', { class: 'field-input', id: fid('labels'), value: t.labels.join(', '), placeholder: 'e.g. home, calls', 'data-fk': 'labels' });
   labels.addEventListener('blur', () => {
     const next = labels.value.split(',').map((x) => x.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
     if (next.join(',') !== t.labels.join(',')) patch(t.id, { labels: next });
   });
 
-  const deadline = h('input', { class: 'field-input', type: 'date', value: t.deadline ?? '', 'aria-label': 'Deadline', onchange: (e) => patch(t.id, { deadline: e.target.value || null }) });
-  const duration = h('input', { class: 'field-input', type: 'number', min: '1', max: '1440', value: t.duration_min ?? '', placeholder: 'minutes', 'aria-label': 'Estimated minutes' });
+  const deadline = h('input', { class: 'field-input', id: fid('deadline'), type: 'date', value: t.deadline ?? '', 'data-fk': 'deadline', onchange: (e) => patch(t.id, { deadline: e.target.value || null }) });
+  const duration = h('input', { class: 'field-input', id: fid('estimate'), type: 'number', inputmode: 'numeric', min: '1', max: '1440', value: t.duration_min ?? '', placeholder: 'minutes', 'data-fk': 'estimate' });
   duration.addEventListener('change', () => patch(t.id, { duration_min: duration.value ? Number(duration.value) : null }));
 
+  const breakLabel = () => [icon('sparkles', { size: 13 }), 'Break down'];
   const breakBtn = h('button', {
-    class: 'btn ai small',
+    class: 'btn ai small', 'data-fk': 'breakdown',
     onclick: async () => {
       breakBtn.disabled = true;
-      breakBtn.replaceChildren(spinner(), ' Thinking');
+      breakBtn.setAttribute('aria-busy', 'true');
+      breakBtn.replaceChildren(spinner(), 'Thinking');
       try {
         const subs = await api('POST', `/ai/breakdown/${t.id}`);
         toast(`Added ${subs.length} subtasks`);
         await refresh();
-      } catch (e) { showError(e); breakBtn.disabled = false; breakBtn.textContent = 'Break down'; }
+      } catch (e) {
+        showError(e);
+        breakBtn.disabled = false;
+        breakBtn.removeAttribute('aria-busy');
+        breakBtn.replaceChildren(...breakLabel());
+      }
     },
-  }, 'Break down');
+  }, ...breakLabel());
 
-  const comment = h('textarea', { placeholder: 'Add a comment', 'aria-label': 'Add a comment' });
+  const comment = h('textarea', { placeholder: 'Write a comment', 'aria-label': 'Add a comment', 'data-fk': 'comment' });
   const commentForm = h('form', {
     class: 'comment-form',
     onsubmit: async (e) => {
       e.preventDefault();
       if (!comment.value.trim()) return;
-      try { await api('POST', `/tasks/${t.id}/comments`, { body: comment.value }); renderDrawer(); } catch (err) { showError(err); }
+      try { await api('POST', `/tasks/${t.id}/comments`, { body: comment.value }); await renderDrawer(); $('#drawer [data-fk="comment"]')?.focus(); } catch (err) { showError(err); }
     },
-  }, comment, h('div', { class: 'modal-actions' }, h('button', { class: 'btn small' }, 'Comment')));
+  }, comment, h('div', { class: 'modal-actions' }, h('button', { class: 'btn small' }, icon('comment', { size: 13 }), 'Comment')));
   comment.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commentForm.requestSubmit(); });
 
   const who = { user: 'You', ai: 'AI', mcp: 'Claude' };
   const parent = t.parent_id ? await api('GET', `/tasks/${t.parent_id}`).catch(() => null) : null;
+  const subDone = t.subtasks.filter((s) => s.completed_at).length;
+  const progress = t.subtasks.length ? h('div', {
+    class: 'progress', role: 'progressbar', 'aria-label': 'Subtasks done',
+    'aria-valuemin': '0', 'aria-valuemax': String(t.subtasks.length), 'aria-valuenow': String(subDone),
+  }, h('span')) : null;
+  if (progress) progress.firstChild.style.width = `${(subDone / t.subtasks.length) * 100}%`;
+  const when = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
   d.replaceChildren(h('div', { class: 'drawer-inner' },
     h('div', { class: 'drawer-top' },
       dot(t.project_color), h('span', {}, t.project_name + (t.section_name ? ` / ${t.section_name}` : '')),
       h('span', { class: 'spacer' }),
-      h('button', { class: 'icon-btn', title: 'Close (Esc)', 'aria-label': 'Close', onclick: closeDrawer }, '×')),
+      h('button', { class: 'icon-btn', title: 'Close (Esc)', 'aria-label': 'Close task details', 'data-fk': 'close', onclick: closeDrawer }, icon('x', { size: 18 }))),
     parent ? h('div', { class: 'hint' }, 'Subtask of ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); openTask(parent.id); } }, parent.content)) : null,
     h('div', { class: 'd-title' },
-      h('button', { class: `check p${t.priority}${t.completed_at ? ' checked' : ''}`, 'aria-label': 'Toggle complete', onclick: (e) => toggleComplete(t, e.currentTarget) }),
+      h('button', {
+        class: `check p${t.priority}${t.completed_at ? ' checked' : ''}`, 'data-fk': 'check',
+        'aria-label': t.completed_at ? 'Mark as not done' : 'Complete task', 'aria-pressed': String(Boolean(t.completed_at)),
+        onclick: (e) => toggleComplete(t, e.currentTarget),
+      }, icon('check', { size: 12 })),
       title),
     desc,
     h('div', { class: 'fields' },
-      h('label', {}, 'Due'), h('div', {}, due, t.recurrence ? h('div', { class: 'hint' }, `Repeats ${t.recurrence}. Next: ${dueLabel(t.due_date)}`) : h('div', { class: 'hint' }, t.due_date ? parseDate(t.due_date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'Type a date in plain English')),
-      h('label', {}, 'Priority'), prio,
-      h('label', {}, 'Project'), h('div', { class: 'field-row' }, project, section),
-      h('label', {}, 'Labels'), labels,
-      h('label', {}, 'Deadline'), deadline,
-      h('label', {}, 'Estimate'), duration,
+      h('label', { for: fid('due') }, 'Due'), h('div', {}, due, h('div', { class: 'hint', id: fid('due-hint') }, dueHint)),
+      h('span', { id: fid('prio-label'), class: 'field-name' }, 'Priority'), prio,
+      h('label', { for: fid('project') }, 'Project'), h('div', { class: 'field-row' }, project, section),
+      h('label', { for: fid('labels') }, 'Labels'), labels,
+      h('label', { for: fid('deadline') }, 'Deadline'), deadline,
+      h('label', { for: fid('estimate') }, 'Estimate'), duration,
     ),
-    h('div', { class: 'section-title' }, `Subtasks ${t.subtasks.length ? `${t.subtasks.filter((s) => s.completed_at).length}/${t.subtasks.length}` : ''}`, h('span', { class: 'spacer' }), breakBtn),
+    h('div', { class: 'section-title' }, 'Subtasks', t.subtasks.length ? h('span', { class: 'count' }, `${subDone}/${t.subtasks.length}`) : null, h('span', { class: 'spacer' }), breakBtn),
+    progress,
     ...t.subtasks.map((s) => taskRow(s, 0, { showProject: false })),
     inlineAdd({ parent_id: t.id }, 'Add subtask'),
-    h('div', { class: 'section-title' }, 'Comments'),
+    h('div', { class: 'section-title' }, 'Comments', t.comments.length ? h('span', { class: 'count' }, String(t.comments.length)) : null),
     ...t.comments.map((c) => h('div', { class: 'comment' },
-      h('div', { class: 'who' }, `${who[c.author] ?? c.author} · ${new Date(c.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`),
+      h('div', { class: 'who' }, `${who[c.author] ?? c.author} · ${when(c.created_at)}`),
       h('div', { class: 'comment-body' }, c.body))),
     commentForm,
     h('div', { class: 'section-title' }, 'History'),
-    h('div', { class: 'history' }, ...history.map((a) => h('div', {}, `${new Date(a.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · ${who[a.actor] ?? a.actor}: ${a.summary}`))),
-    h('div', { class: 'modal-actions' }, t.deleted_at
-      ? h('button', { class: 'btn', onclick: async () => { try { await api('POST', `/tasks/${t.id}/restore`); refresh(); } catch (e) { showError(e); } } }, 'Restore')
+    h('div', { class: 'history' }, ...history.map((a) => h('div', {}, `${when(a.at)} · ${who[a.actor] ?? a.actor}: ${a.summary}`))),
+    h('div', { class: 'drawer-foot' }, t.deleted_at
+      ? h('button', { class: 'btn', onclick: async () => { try { await api('POST', `/tasks/${t.id}/restore`); refresh(); } catch (e) { showError(e); } } }, icon('undo', { size: 14 }), 'Restore')
       : h('button', {
         class: 'btn danger',
         onclick: async () => {
@@ -817,10 +918,11 @@ async function renderDrawer() {
             refresh();
           } catch (e) { showError(e); }
         },
-      }, 'Delete task')),
+      }, icon('trash', { size: 14 }), 'Delete task')),
   ));
   d.classList.add('open');
   d.setAttribute('aria-hidden', 'false');
+  if (focusKey) d.querySelector(`[data-fk="${focusKey}"]`)?.focus({ preventScroll: true });
   requestAnimationFrame(fit);
 }
 
@@ -872,25 +974,38 @@ $('#quick-form').addEventListener('submit', async (e) => {
 });
 $('#smart-add').addEventListener('click', openSmartAdd);
 $('#add-project').addEventListener('click', addProject);
-$('#menu-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+
+// Mobile menu: a scrim behind the sidebar closes it, and the button reports its state.
+function setMenu(open) {
+  $('#sidebar').classList.toggle('open', open);
+  $('#menu-btn').setAttribute('aria-expanded', String(open));
+  $('#menu-btn').setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+  if (open) $('#sidebar a.active, #sidebar a')?.focus();
+}
+$('#menu-btn').addEventListener('click', () => setMenu(!$('#sidebar').classList.contains('open')));
+$('#scrim').addEventListener('click', () => setMenu(false));
 $('#search-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const q = $('#search-input').value.trim();
   if (q) location.hash = `#/search/${encodeURIComponent(q)}`;
 });
 
-window.addEventListener('hashchange', () => {
+window.addEventListener('hashchange', async () => {
   state.route = parseRoute();
-  $('#sidebar').classList.remove('open');
+  const fromMenu = $('#sidebar').contains(document.activeElement);
+  setMenu(false);
   renderSidebar();
-  renderView();
+  await renderView();
   renderPreview();
+  // After navigating, put screen reader and keyboard users at the top of the new view.
+  if (fromMenu) $('#view-title').focus({ preventScroll: true });
 });
 
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
   if (e.key === 'Escape') {
     if (typing) document.activeElement.blur();
+    else if ($('#sidebar').classList.contains('open')) { setMenu(false); $('#menu-btn').focus(); }
     else if (state.openId) closeDrawer();
     return;
   }
@@ -900,5 +1015,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 's') { e.preventDefault(); openSmartAdd(); }
 });
 
+// Static icons in index.html are placeholders (<span data-icon="...">) filled in here.
+const ICON_SIZES = { menu: 20, plus: 18, check: 15 };
+for (const el of document.querySelectorAll('[data-icon]')) el.append(icon(el.dataset.icon, { size: ICON_SIZES[el.dataset.icon] ?? 15 }));
+
 state.route = parseRoute();
+fill($('#content'), skeleton());
 refresh();

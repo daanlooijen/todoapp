@@ -2,63 +2,70 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#18181a" media="(prefers-color-scheme: dark)">
   <title>Taskline</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bdb'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11.5' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to tasks</a>
   <div class="app">
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" aria-label="Navigation">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-mark" data-icon="check" aria-hidden="true"></span>
         <span>Taskline</span>
       </div>
       <form class="search" id="search-form" role="search">
-        <input id="search-input" type="search" placeholder="Search  ( / )" aria-label="Search tasks" autocomplete="off">
+        <span data-icon="search"></span>
+        <input id="search-input" type="search" placeholder="Search" aria-label="Search tasks" aria-keyshortcuts="/" autocomplete="off">
       </form>
-      <nav id="nav-main" class="nav"></nav>
+      <nav id="nav-main" class="nav" aria-label="Views"></nav>
       <div class="nav-heading">
-        <span>Projects</span>
-        <button class="icon-btn" id="add-project" title="Add project" aria-label="Add project">+</button>
+        <span id="projects-heading">Projects</span>
+        <button class="icon-btn" id="add-project" title="Add project" aria-label="Add project" data-icon="plus"></button>
       </div>
-      <nav id="nav-projects" class="nav"></nav>
-      <div class="nav-heading"><span>Labels</span></div>
-      <nav id="nav-labels" class="nav"></nav>
+      <nav id="nav-projects" class="nav" aria-labelledby="projects-heading"></nav>
+      <div class="nav-heading"><span id="labels-heading">Labels</span></div>
+      <nav id="nav-labels" class="nav" aria-labelledby="labels-heading"></nav>
       <div class="sidebar-foot">
-        <nav id="nav-tools" class="nav"></nav>
+        <nav id="nav-tools" class="nav" aria-label="Tools"></nav>
         <div id="status" class="status"></div>
       </div>
     </aside>
+    <div class="scrim" id="scrim" aria-hidden="true"></div>
 
-    <main class="main">
+    <main class="main" id="main" tabindex="-1">
       <header class="main-head">
-        <button class="icon-btn menu-btn" id="menu-btn" aria-label="Toggle menu">&#9776;</button>
+        <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button>
         <div class="title-wrap">
-          <h1 id="view-title">Today</h1>
+          <h1 id="view-title" tabindex="-1">Today</h1>
           <div id="view-sub" class="view-sub"></div>
         </div>
         <div id="view-actions" class="view-actions"></div>
       </header>
 
-      <section id="composer" class="composer">
+      <section id="composer" class="composer" aria-label="Add a task">
         <form id="quick-form" class="quick">
-          <span class="quick-plus" aria-hidden="true">+</span>
-          <input id="quick-input" autocomplete="off" aria-label="Add a task"
-                 placeholder='Add a task, e.g. "Call mom tomorrow 5pm #Work @phone p1"'>
-          <button type="button" class="btn ai" id="smart-add" title="Turn messy notes into tasks with AI">Smart add</button>
+          <span class="quick-plus" data-icon="plus"></span>
+          <input id="quick-input" autocomplete="off" aria-label="Add a task" aria-describedby="quick-hint" aria-keyshortcuts="q"
+                 placeholder="Add a task">
+          <button type="button" class="btn ai" id="smart-add" aria-label="Smart add" title="Turn messy notes into tasks with AI (s)" aria-keyshortcuts="s"><span data-icon="sparkles"></span><span class="smart-label">Smart add</span></button>
         </form>
-        <div id="quick-preview" class="chips"></div>
+        <div id="quick-preview" class="chips" aria-live="polite"></div>
+        <div id="quick-hint" class="quick-hint">Try "Call mom tomorrow 5pm #Work @phone p1". Press q to add, s for smart add.</div>
       </section>
 
-      <section id="content" class="content" aria-live="polite"></section>
+      <section id="content" class="content" aria-labelledby="view-title"></section>
     </main>
 
-    <aside id="drawer" class="drawer" aria-hidden="true"></aside>
+    <aside id="drawer" class="drawer" aria-label="Task details" aria-hidden="true"></aside>
   </div>
 
   <div id="modal-root"></div>
-  <div id="toast" class="toast" role="status"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
