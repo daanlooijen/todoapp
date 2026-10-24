@@ -42,6 +42,8 @@ const ICONS = {
   folder: [['path', { d: 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z' }]],
   note: [['path', { d: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8' }]],
   layers: [['path', { d: 'm12 2 10 5-10 5L2 7zM2 17l10 5 10-5M2 12l10 5 10-5' }]],
+  list: [['path', { d: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01' }]],
+  board: [['rect', { x: 3, y: 3, width: 18, height: 18, rx: 2 }], ['path', { d: 'M8 7v7M12 7v4M16 7v9' }]],
 };
 
 // Returns an <svg> for `name`. Decorative by default (hidden from screen readers);

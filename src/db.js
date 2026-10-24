@@ -88,6 +88,11 @@ const MIGRATIONS = [
   );
   CREATE INDEX activity_entity ON activity(entity, entity_id);
   `,
+  // v2: kanban status for open tasks. "Done" is completed_at, not a status value.
+  `
+  ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'doing'));
+  CREATE INDEX tasks_status ON tasks(status) WHERE completed_at IS NULL AND deleted_at IS NULL;
+  `,
 ];
 
 export function openDb(file = DB_PATH) {

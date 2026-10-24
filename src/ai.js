@@ -191,7 +191,7 @@ export async function planDay(store) {
   const lines = candidates.map((t) => [
     `id=${t.id}`, `"${t.content}"`, `p${t.priority}`, `due=${t.due_date || 'none'}${t.due_time ? ` ${t.due_time}` : ''}`,
     t.recurrence && `repeats=${t.recurrence}`, t.duration_min && `est=${t.duration_min}min`, `project=${t.project_name}`,
-    t.labels.length && `labels=${t.labels.join(',')}`, t.parent_id && 'subtask',
+    t.labels.length && `labels=${t.labels.join(',')}`, t.parent_id && 'subtask', t.status === 'doing' && 'IN PROGRESS',
   ].filter(Boolean).join(' | '));
 
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString();

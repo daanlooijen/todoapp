@@ -78,6 +78,7 @@ api.post('/quick-add', (req, res) => {
 api.patch('/tasks/:id', (req, res) => res.json(store.updateTask(req.params.id, req.body)));
 api.post('/tasks/:id/complete', (req, res) => res.json(store.completeTask(req.params.id)));
 api.post('/tasks/:id/uncomplete', (req, res) => res.json(store.uncompleteTask(req.params.id)));
+api.post('/tasks/:id/move', (req, res) => res.json(store.moveTask(req.params.id, req.body?.status)));
 api.post('/tasks/:id/restore', (req, res) => res.json(store.restoreTask(req.params.id)));
 api.delete('/tasks/:id', (req, res) => { store.deleteTask(req.params.id); res.status(204).end(); });
 api.post('/tasks/:id/comments', (req, res) => res.status(201).json(store.addComment(req.params.id, req.body?.body)));

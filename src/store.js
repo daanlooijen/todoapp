@@ -11,6 +11,10 @@ export class ValidationError extends Error {}
 
 export const COLORS = ['slate', 'red', 'orange', 'amber', 'green', 'teal', 'blue', 'indigo', 'violet', 'pink'];
 export const ACTORS = ['user', 'ai', 'mcp'];
+// Board columns. "done" is not stored here: a task is done when completed_at is set,
+// so completion keeps one source of truth (and recurring tasks keep working).
+export const STATUSES = ['todo', 'doing'];
+const STATUS_NAMES = { todo: 'To do', doing: 'Doing', done: 'Done' };
 
 const newId = () => randomBytes(9).toString('base64url');
 const now = () => new Date().toISOString();
@@ -36,6 +40,7 @@ const TaskFields = z.object({
   duration_min: z.number().int().min(1).max(1440).nullable(),
   labels: z.array(z.string().trim().min(1).max(60)).max(20),
   position: z.number(),
+  status: z.enum(STATUSES),
 }).strict();
 
 const TaskCreate = TaskFields.partial().required({ content: true });
@@ -288,35 +293,52 @@ export class Store {
   }
 
   // view: inbox | today | upcoming | project | label | search | completed | trash | all
-  listTasks({ view = 'all', project_id, label, q, days = 14, limit = 500 } = {}) {
+  // done_days: also include tasks completed in the last N days (the board's Done column).
+  // status: only open tasks with that status (todo | doing).
+  listTasks({ view = 'all', project_id, label, q, days = 14, limit = 500, done_days, status } = {}) {
     const where = [];
     const params = [];
-    const active = 't.completed_at IS NULL AND t.deleted_at IS NULL AND p.archived_at IS NULL';
+    const doneSince = Number(done_days) > 0 ? new Date(Date.now() - Number(done_days) * 86400000).toISOString() : null;
+    // Adds the "not deleted, not completed (or recently completed)" conditions, keeping params in order.
+    const open = ({ includeArchived = false } = {}) => {
+      where.push(includeArchived ? 't.deleted_at IS NULL' : 't.deleted_at IS NULL AND p.archived_at IS NULL');
+      if (doneSince) {
+        where.push('(t.completed_at IS NULL OR t.completed_at >= ?)');
+        params.push(doneSince);
+      } else {
+        where.push('t.completed_at IS NULL');
+      }
+    };
     let order = 't.position';
 
     switch (view) {
       case 'inbox':
-        where.push(active, 'p.is_inbox = 1');
+        open();
+        where.push('p.is_inbox = 1');
         order = 't.position';
         break;
       case 'today':
-        where.push(active, 't.due_date IS NOT NULL AND t.due_date <= ?');
+        open();
+        where.push('t.due_date IS NOT NULL AND t.due_date <= ?');
         params.push(today());
         order = "t.due_date, COALESCE(t.due_time, '99:99'), t.priority, t.position";
         break;
       case 'upcoming':
-        where.push(active, 't.due_date IS NOT NULL AND t.due_date <= ?');
+        open();
+        where.push('t.due_date IS NOT NULL AND t.due_date <= ?');
         params.push(fmtDate(addDays(new Date(), days)));
         order = "t.due_date, COALESCE(t.due_time, '99:99'), t.priority, t.position";
         break;
       case 'project':
         if (!project_id) throw new ValidationError('project_id is required for the project view');
-        where.push('t.completed_at IS NULL AND t.deleted_at IS NULL', 't.project_id = ?');
+        open({ includeArchived: true });
+        where.push('t.project_id = ?');
         params.push(project_id);
         break;
       case 'label':
         if (!label) throw new ValidationError('label is required for the label view');
-        where.push(active, 'EXISTS (SELECT 1 FROM task_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.task_id = t.id AND l.name = ? COLLATE NOCASE)');
+        open();
+        where.push('EXISTS (SELECT 1 FROM task_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.task_id = t.id AND l.name = ? COLLATE NOCASE)');
         params.push(label.replace(/^@/, ''));
         order = 't.priority, t.due_date IS NULL, t.due_date, t.position';
         break;
@@ -338,11 +360,17 @@ export class Store {
         order = 't.deleted_at DESC';
         break;
       case 'all':
-        where.push(active);
+        open();
         order = 'p.position, t.position';
         break;
       default:
         throw new ValidationError(`Unknown view "${view}"`);
+    }
+
+    if (status) {
+      if (!STATUSES.includes(status)) throw new ValidationError(`status must be one of: ${STATUSES.join(', ')}`);
+      where.push('t.completed_at IS NULL AND t.status = ?');
+      params.push(status);
     }
 
     params.push(Math.min(Math.max(Number(limit) || 500, 1), 2000));
@@ -354,7 +382,7 @@ export class Store {
   // Turns validated input into column values, resolving names and natural-language dates.
   resolveTaskFields(f, existing = null) {
     const out = {};
-    for (const k of ['content', 'description', 'section_id', 'priority', 'due_date', 'due_time', 'deadline', 'duration_min', 'position']) {
+    for (const k of ['content', 'description', 'section_id', 'priority', 'due_date', 'due_time', 'deadline', 'duration_min', 'position', 'status']) {
       if (f[k] !== undefined) out[k] = f[k];
     }
 
@@ -466,7 +494,10 @@ export class Store {
         this.run('DELETE FROM task_labels WHERE task_id = ?', id);
         for (const name of f.labels) this.run('INSERT OR IGNORE INTO task_labels (task_id, label_id) VALUES (?, ?)', id, this.labelId(name));
       }
-      this.log(actor, 'update', 'task', id, `Updated "${v.content ?? existing.content}"`, { changes: Object.keys(f) });
+      const onlyStatus = Object.keys(f).length === 1 && f.status && f.status !== existing.status;
+      this.log(actor, 'update', 'task', id,
+        onlyStatus ? `Moved "${existing.content}" to ${STATUS_NAMES[f.status]}` : `Updated "${v.content ?? existing.content}"`,
+        { changes: Object.keys(f) });
       return this.getTask(id);
     });
   }
@@ -480,7 +511,8 @@ export class Store {
       if (t.completed_at) return t;
       if (t.recurrence) {
         const next = nextDue(t.recurrence, t.due_date);
-        this.run('UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ?', next, now(), id);
+        // The next occurrence starts fresh in To do.
+        this.run("UPDATE tasks SET due_date = ?, status = 'todo', updated_at = ? WHERE id = ?", next, now(), id);
         this.run('UPDATE tasks SET completed_at = NULL WHERE parent_id = ?', id);
         this.log(actor, 'complete', 'task', id, `Completed "${t.content}" (next: ${next})`, { recurring: true, was_due: t.due_date, next_due: next });
       } else {
@@ -500,6 +532,27 @@ export class Store {
       this.run(`WITH RECURSIVE a(id) AS (SELECT ? UNION ALL SELECT t.parent_id FROM tasks t JOIN a ON t.id = a.id WHERE t.parent_id IS NOT NULL)
                 UPDATE tasks SET completed_at = NULL, updated_at = ? WHERE id IN (SELECT id FROM a)`, id, now());
       this.log(actor, 'uncomplete', 'task', id, `Reopened "${t.content}"`);
+      return this.getTask(id);
+    });
+  }
+
+  // Moves a task between board columns. "done" completes it (recurring tasks advance to
+  // their next date and land back in To do); leaving "done" reopens it into the new column.
+  moveTask(id, status, actor = 'user') {
+    if (status === 'done') return this.completeTask(id, actor);
+    if (!STATUSES.includes(status)) throw new ValidationError(`status must be one of: ${[...STATUSES, 'done'].join(', ')}`);
+    return this.tx(() => {
+      const t = this.getTask(id);
+      if (t.deleted_at) throw new ValidationError('Cannot move a deleted task');
+      if (!t.completed_at && t.status === status) return t;
+      const at = now();
+      if (t.completed_at) {
+        // Reopen it, and its parents, so it doesn't stay hidden under a completed parent.
+        this.run(`WITH RECURSIVE a(id) AS (SELECT ? UNION ALL SELECT t.parent_id FROM tasks t JOIN a ON t.id = a.id WHERE t.parent_id IS NOT NULL)
+                  UPDATE tasks SET completed_at = NULL, updated_at = ? WHERE id IN (SELECT id FROM a)`, id, at);
+      }
+      this.run('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?', status, at, id);
+      this.log(actor, 'move', 'task', id, `Moved "${t.content}" to ${STATUS_NAMES[status]}`, { from: t.completed_at ? 'done' : t.status, to: status });
       return this.getTask(id);
     });
   }
@@ -616,6 +669,7 @@ export class Store {
         active: count(''),
         overdue: count('AND t.due_date < ?', d),
         due_today: count('AND t.due_date = ?', d),
+        doing: count("AND t.status = 'doing'"),
         inbox: count('AND p.is_inbox = 1'),
         completed_last_7_days: this.get('SELECT COUNT(*) AS n FROM activity WHERE action = ? AND entity = ? AND at >= ?', 'complete', 'task', weekAgo).n,
       },

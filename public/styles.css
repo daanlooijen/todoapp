@@ -13,6 +13,8 @@
   --hover: rgba(34, 32, 28, 0.05);
   --press: rgba(34, 32, 28, 0.09);
   --skeleton: #ece9e3;
+  --col-bg: #f4f2ee;
+  --shadow-card-hover: 0 4px 12px rgba(30, 25, 15, 0.08);
 
   /* text */
   --text: #22201c;
@@ -71,6 +73,8 @@
     --hover: rgba(255, 255, 255, 0.05);
     --press: rgba(255, 255, 255, 0.09);
     --skeleton: #29292d;
+    --col-bg: #1c1c1f;
+    --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.45);
     --text: #ecebe8;
     --muted: #b0ada7;
     --faint: #8a8884;
@@ -469,6 +473,78 @@ h1:focus { outline: none; }
 .toast.error { background: #b4342d; }
 .toast.error .icon, .toast.error button { color: #fff; }
 
+/* ========================================================================= segmented control */
+.seg {
+  display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--radius); background: var(--hover);
+  border: 1px solid var(--border);
+}
+.seg button {
+  border: 0; background: none; min-height: calc(var(--target) - 6px); padding: 3px 10px; border-radius: 7px;
+  font-size: 13px; font-weight: 600; color: var(--muted); display: inline-flex; align-items: center; gap: 6px;
+  transition: background-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.seg button:hover { color: var(--text); }
+.seg button[aria-pressed="true"], .seg button[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+.seg .count { color: var(--faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+.fields .seg { flex-wrap: wrap; }
+
+.badge.doing { background: var(--accent-soft); color: var(--accent); }
+
+/* ========================================================================= board */
+.main.board-mode .main-head, .main.board-mode .composer, .main.board-mode .content { max-width: 1280px; }
+.board-tabs { display: none; }
+.board {
+  display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: var(--space-4);
+  margin-top: var(--space-5); align-items: start; overflow-x: auto; padding-bottom: var(--space-1);
+}
+.col {
+  background: var(--col-bg); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: var(--space-2); min-height: 260px; display: flex; flex-direction: column; gap: var(--space-1);
+  transition: background-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.col.drop { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
+.col-head { display: flex; align-items: center; gap: var(--space-2); padding: 6px var(--space-2) var(--space-2); }
+.col-head h2 { font-size: 13px; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
+.col-head .count {
+  font-size: 12px; font-weight: 600; color: var(--muted); background: var(--hover); padding: 0 7px;
+  border-radius: var(--radius-full); font-variant-numeric: tabular-nums;
+}
+.col-sub { margin-left: auto; font-size: 12px; color: var(--faint); }
+.col-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--p4); }
+.col-dot.doing { background: var(--accent); }
+.col-dot.done { background: var(--ok); }
+.col-body { display: flex; flex-direction: column; gap: var(--space-2); min-height: 48px; }
+.col-empty {
+  border: 1.5px dashed var(--border-strong); border-radius: var(--radius); padding: var(--space-5) var(--space-3);
+  text-align: center; color: var(--faint); font-size: 13px;
+}
+.col .inline-add { border-radius: 8px; padding: 2px var(--space-2); }
+.col .inline-add:hover { background: var(--hover); }
+
+.card-task {
+  position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px 10px 14px; box-shadow: var(--shadow-sm); cursor: grab;
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast), transform var(--dur-fast) var(--ease-out), opacity var(--dur-fast);
+}
+/* Priority stripe; the P1/P2/P3 text in the meta line carries the same meaning for those who can't see color. */
+.card-task::before {
+  content: ""; position: absolute; left: -1px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: transparent;
+}
+.card-task.p1::before { background: var(--p1); }
+.card-task.p2::before { background: var(--p2); }
+.card-task.p3::before { background: var(--p3); }
+.card-task:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card-hover); transform: translateY(-1px); }
+.card-task:active { cursor: grabbing; }
+.card-task:focus-visible { outline-offset: 2px; }
+.card-task.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card-task.dragging { opacity: 0.4; transform: none; }
+.card-task.done .card-title { text-decoration: line-through; color: var(--faint); }
+.card-top { display: flex; gap: 10px; align-items: flex-start; }
+.card-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; line-height: 1.45; }
+.card-task .task-desc { padding-left: 30px; margin-top: 2px; }
+.card-task .meta { padding-left: 30px; margin-top: 6px; }
+.card-task .meta .proj { margin-left: 0; }
+
 /* ========================================================================= keyframes */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fade-in { from { opacity: 0; } }
@@ -505,6 +581,14 @@ h1:focus { outline: none; }
   .fields > label:not(:first-child) { margin-top: var(--space-2); }
   .smart-label { display: none; }
   .quick-hint { display: none; }
+  /* Phones: one column at a time, switched with tabs, instead of sideways scrolling. */
+  .board-tabs { display: flex; width: 100%; margin-top: var(--space-4); }
+  .board-tabs button { flex: 1; justify-content: center; min-height: 40px; }
+  .board { grid-template-columns: minmax(0, 1fr); margin-top: var(--space-3); }
+  .board[data-tab="todo"] .col:not(.col-todo), .board[data-tab="doing"] .col:not(.col-doing), .board[data-tab="done"] .col:not(.col-done) { display: none; }
+  .col { min-height: 0; }
+  .col-head { display: none; }
+  .seg-label { display: none; }
   .content { padding-bottom: calc(120px + env(safe-area-inset-bottom)); }
 }
 

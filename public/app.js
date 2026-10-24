@@ -47,7 +47,16 @@ async function api(method, url, body) {
   return data;
 }
 
-const state = { boot: null, route: { kind: 'today', arg: '' }, openId: null, head: 0 };
+// Per-browser preferences. Storage can be unavailable (private mode), so failures are ignored.
+const prefs = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* not persisted, still works this session */ } },
+};
+const state = {
+  boot: null, route: { kind: 'today', arg: '' }, openId: null, head: 0,
+  layout: prefs.get('taskline.layout') === 'board' ? 'board' : 'list',
+  boardTab: 'todo',
+};
 const todayStr = () => fmtDate(new Date());
 const projectById = (id) => state.boot.projects.find((p) => p.id === id);
 
@@ -194,6 +203,27 @@ function dueClass(date) {
   return date < t ? 'overdue' : date === t ? 'today' : '';
 }
 
+// The small line under a task title: date, priority, progress, labels, project.
+function taskMeta(t, { showProject = true, showStatus = true } = {}) {
+  const meta = h('div', { class: 'meta' });
+  if (showStatus && !t.completed_at && t.status === 'doing') meta.append(h('span', { class: 'badge doing' }, 'In progress'));
+  if (t.due_date) {
+    const cls = dueClass(t.due_date);
+    meta.append(h('span', { class: `due ${cls}` },
+      icon(t.recurrence ? 'repeat' : 'calendar', { size: 12 }),
+      cls === 'overdue' ? h('span', { class: 'sr-only' }, 'Overdue: ') : null,
+      dueLabel(t.due_date), t.due_time ? ` ${t.due_time}` : '',
+      t.recurrence ? h('span', { class: 'sr-only' }, `, repeats ${t.recurrence}`) : null));
+  }
+  if (t.priority < 4) meta.append(h('span', { class: `prio p${t.priority}`, title: `Priority ${t.priority}` }, icon('flag', { size: 12 }), `P${t.priority}`));
+  if (t.deadline) meta.append(h('span', { title: 'Deadline' }, icon('flag', { size: 12 }), `Deadline ${dueLabel(t.deadline)}`));
+  if (t.subtask_count) meta.append(h('span', { title: 'Subtasks done' }, icon('subtasks', { size: 12 }), `${t.subtask_done}/${t.subtask_count}`));
+  if (t.comment_count) meta.append(h('span', { title: 'Comments' }, icon('comment', { size: 12 }), String(t.comment_count)));
+  for (const l of t.labels) meta.append(h('span', {}, `@${l}`));
+  if (showProject) meta.append(h('span', { class: 'proj' }, dot(t.project_color), t.project_name + (t.section_name ? ` / ${t.section_name}` : '')));
+  return meta;
+}
+
 function taskRow(t, depth = 0, { showProject = true } = {}) {
   const done = Boolean(t.completed_at);
   const row = h('div', {
@@ -210,21 +240,7 @@ function taskRow(t, depth = 0, { showProject = true } = {}) {
     'aria-pressed': String(done),
     onclick: (e) => { e.stopPropagation(); toggleComplete(t, check); },
   }, icon('check', { size: 12 }));
-  const meta = h('div', { class: 'meta' });
-  if (t.due_date) {
-    const cls = dueClass(t.due_date);
-    meta.append(h('span', { class: `due ${cls}` },
-      icon(t.recurrence ? 'repeat' : 'calendar', { size: 12 }),
-      cls === 'overdue' ? h('span', { class: 'sr-only' }, 'Overdue: ') : null,
-      dueLabel(t.due_date), t.due_time ? ` ${t.due_time}` : '',
-      t.recurrence ? h('span', { class: 'sr-only' }, `, repeats ${t.recurrence}`) : null));
-  }
-  if (t.priority < 4) meta.append(h('span', { class: `prio p${t.priority}`, title: `Priority ${t.priority}` }, icon('flag', { size: 12 }), `P${t.priority}`));
-  if (t.deadline) meta.append(h('span', { title: 'Deadline' }, icon('flag', { size: 12 }), `Deadline ${dueLabel(t.deadline)}`));
-  if (t.subtask_count) meta.append(h('span', { title: 'Subtasks done' }, icon('subtasks', { size: 12 }), `${t.subtask_done}/${t.subtask_count}`));
-  if (t.comment_count) meta.append(h('span', { title: 'Comments' }, icon('comment', { size: 12 }), String(t.comment_count)));
-  for (const l of t.labels) meta.append(h('span', {}, `@${l}`));
-  if (showProject) meta.append(h('span', { class: 'proj' }, dot(t.project_color), t.project_name + (t.section_name ? ` / ${t.section_name}` : '')));
+  const meta = taskMeta(t, { showProject });
   row.append(check, h('div', { class: 'task-body' },
     h('div', { class: 'task-title' }, t.content),
     t.description ? h('div', { class: 'task-desc' }, t.description.split('\n')[0]) : null,
@@ -316,6 +332,137 @@ function skeleton(rows = 4) {
       h('span', { class: 'sk-lines' }, h('span', { class: 'sk-line', style: null }), i % 2 ? null : h('span', { class: 'sk-line short' })))));
 }
 
+// ---------- board ----------
+
+const COLUMNS = [
+  { key: 'todo', title: 'To do', empty: 'Nothing waiting. Add a task below.' },
+  { key: 'doing', title: 'Doing', empty: 'Drag a card here when you start on it.' },
+  { key: 'done', title: 'Done', sub: 'last 7 days', empty: 'Finished tasks land here.' },
+];
+const COLUMN_NAMES = { todo: 'To do', doing: 'Doing', done: 'Done' };
+const columnOf = (t) => (t.completed_at ? 'done' : t.status);
+let dragging = null;
+
+// Moves a card to another column, with an Undo that puts it back exactly where it was.
+async function moveTo(t, status, { refocus = false } = {}) {
+  const from = columnOf(t);
+  if (from === status) return;
+  try {
+    const res = await api('POST', `/tasks/${t.id}/move`, { status });
+    if (status === 'done' && t.recurrence) {
+      toast(`Done. Next: ${dueLabel(res.due_date)}`, 'Undo', async () => {
+        await api('PATCH', `/tasks/${t.id}`, { due_date: t.due_date, due_time: t.due_time, status: from });
+        refresh();
+      });
+    } else {
+      toast(`Moved "${t.content}" to ${COLUMN_NAMES[status]}`, 'Undo', async () => {
+        await api('POST', `/tasks/${t.id}/move`, { status: from });
+        refresh();
+      });
+    }
+    await refresh();
+    if (refocus) $(`.card-task[data-id="${CSS.escape(t.id)}"]`)?.focus();
+  } catch (e) { showError(e); }
+}
+
+function card(t) {
+  const col = columnOf(t);
+  const done = col === 'done';
+  const el = h('article', {
+    class: `card-task p${t.priority}${done ? ' done' : ''}${state.openId === t.id ? ' selected' : ''}`,
+    tabindex: '0',
+    draggable: 'true',
+    dataset: { id: t.id },
+    'aria-label': `${t.content}, ${COLUMN_NAMES[col]}`,
+    'aria-keyshortcuts': 'Shift+ArrowLeft Shift+ArrowRight',
+    title: 'Drag to another column, or press Shift + arrow keys',
+    onclick: () => openTask(t.id),
+    onkeydown: (e) => {
+      if (e.target !== el) return;
+      if (e.key === 'Enter') openTask(t.id);
+      if (e.shiftKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+        e.preventDefault();
+        const order = COLUMNS.map((c) => c.key);
+        const next = order[order.indexOf(col) + (e.key === 'ArrowRight' ? 1 : -1)];
+        if (next) moveTo(t, next, { refocus: true });
+      }
+    },
+    ondragstart: (e) => {
+      dragging = t;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', t.id);
+      requestAnimationFrame(() => el.classList.add('dragging'));
+    },
+    ondragend: () => {
+      el.classList.remove('dragging');
+      dragging = null;
+      document.querySelectorAll('.col.drop').forEach((c) => c.classList.remove('drop'));
+    },
+  });
+  const check = h('button', {
+    class: `check p${t.priority}${done ? ' checked' : ''}`,
+    'aria-label': done ? `Mark "${t.content}" as not done` : `Complete "${t.content}"`,
+    'aria-pressed': String(done),
+    onclick: (e) => { e.stopPropagation(); moveTo(t, done ? 'todo' : 'done'); },
+  }, icon('check', { size: 12 }));
+  const meta = taskMeta(t, { showStatus: false });
+  fill(el,
+    h('div', { class: 'card-top' }, check, h('div', { class: 'card-title' }, t.content)),
+    t.description ? h('div', { class: 'task-desc' }, t.description.split('\n')[0]) : null,
+    meta.childNodes.length ? meta : null,
+  );
+  return el;
+}
+
+function boardColumn(c, list) {
+  const col = h('section', { class: `col col-${c.key}`, id: `col-${c.key}`, 'aria-labelledby': `colh-${c.key}`, dataset: { status: c.key } },
+    h('header', { class: 'col-head' },
+      h('span', { class: `col-dot ${c.key}`, 'aria-hidden': 'true' }),
+      h('h2', { id: `colh-${c.key}` }, c.title),
+      h('span', { class: 'count', 'aria-label': `${list.length} tasks` }, String(list.length)),
+      c.sub ? h('span', { class: 'col-sub' }, c.sub) : null),
+    h('div', { class: 'col-body' },
+      ...list.map(card),
+      list.length ? null : h('div', { class: 'col-empty' }, c.empty)),
+    c.key === 'done' ? null : inlineAdd({ ...routeDefaults(), status: c.key }, c.key === 'doing' ? 'Add task in progress' : 'Add task'));
+  col.addEventListener('dragover', (e) => {
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    col.classList.add('drop');
+  });
+  col.addEventListener('dragleave', (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove('drop'); });
+  col.addEventListener('drop', (e) => {
+    e.preventDefault();
+    col.classList.remove('drop');
+    const t = dragging;
+    dragging = null;
+    if (t) moveTo(t, c.key);
+  });
+  return col;
+}
+
+function renderBoard(tasks) {
+  // Subtasks show as progress on their parent's card, not as separate cards.
+  const ids = new Set(tasks.map((t) => t.id));
+  const top = tasks.filter((t) => !(t.parent_id && ids.has(t.parent_id)));
+  const by = { todo: [], doing: [], done: [] };
+  for (const t of top) by[columnOf(t)].push(t);
+  by.done.sort((a, b) => b.completed_at.localeCompare(a.completed_at));
+
+  const board = h('div', { class: 'board', dataset: { tab: state.boardTab } }, ...COLUMNS.map((c) => boardColumn(c, by[c.key])));
+  // On phones only one column shows at a time; these tabs switch between them.
+  const tabs = h('div', { class: 'board-tabs seg', role: 'tablist', 'aria-label': 'Board columns' }, ...COLUMNS.map((c) => h('button', {
+    role: 'tab', id: `tab-${c.key}`, 'aria-controls': `col-${c.key}`, 'aria-selected': String(state.boardTab === c.key),
+    onclick: (e) => {
+      state.boardTab = c.key;
+      board.dataset.tab = c.key;
+      e.currentTarget.parentElement.querySelectorAll('[role=tab]').forEach((b) => b.setAttribute('aria-selected', String(b === e.currentTarget)));
+    },
+  }, c.title, h('span', { class: 'count' }, String(by[c.key].length)))));
+  return [tabs, board];
+}
+
 // ---------- quick add ----------
 
 function quickPayload(text, defaults = {}) {
@@ -329,6 +476,7 @@ function quickPayload(text, defaults = {}) {
     recurrence: p.recurrence,
   };
   if (p.description) body.description = p.description;
+  if (defaults.status) body.status = defaults.status;
   if (p.project_id) body.project_id = p.project_id;
   else if (defaults.project_id) {
     body.project_id = defaults.project_id;
@@ -492,6 +640,21 @@ async function openPlan() {
 // ---------- views ----------
 
 const TASK_VIEWS = new Set(['today', 'upcoming', 'inbox', 'project', 'label', 'search', 'completed', 'trash']);
+const BOARD_VIEWS = new Set(['today', 'upcoming', 'inbox', 'project', 'label', 'search']);
+const boardMode = () => state.layout === 'board' && BOARD_VIEWS.has(state.route.kind);
+
+function layoutToggle() {
+  const make = (key, label, ico) => h('button', {
+    'aria-pressed': String(state.layout === key), title: `${label} view`,
+    onclick: () => {
+      if (state.layout === key) return;
+      state.layout = key;
+      prefs.set('taskline.layout', key);
+      renderView();
+    },
+  }, icon(ico, { size: 15 }), h('span', { class: 'seg-label' }, label));
+  return h('div', { class: 'seg', role: 'group', 'aria-label': 'Layout' }, make('list', 'List', 'list'), make('board', 'Board', 'board'));
+}
 
 function parseRoute() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
@@ -501,7 +664,7 @@ function parseRoute() {
 function setHead(title, sub, actions = []) {
   $('#view-title').textContent = title;
   $('#view-sub').textContent = sub ?? '';
-  $('#view-actions').replaceChildren(...actions);
+  fill($('#view-actions'), ...actions, BOARD_VIEWS.has(state.route.kind) ? layoutToggle() : null);
   document.title = `${title} · Taskline`;
 }
 
@@ -509,6 +672,8 @@ async function renderView() {
   const { kind, arg } = state.route;
   const content = $('#content');
   $('#composer').hidden = !TASK_VIEWS.has(kind) || kind === 'trash' || kind === 'completed';
+  const board = boardMode();
+  $('#main').classList.toggle('board-mode', board);
 
   if (kind === 'memory') return renderMemory(content);
   if (kind === 'activity') return renderActivity(content);
@@ -520,12 +685,16 @@ async function renderView() {
     if (kind === 'label') params.set('label', arg);
     if (kind === 'search') params.set('q', arg);
     if (kind === 'completed') params.set('limit', '200');
+    if (board) params.set('done_days', '7');
     tasks = await api('GET', `/tasks?${params}`);
   } catch (e) {
     fill(content, empty('alert', 'Could not load tasks', e.message));
     return;
   }
 
+  // The board also gets recently finished tasks for its Done column; headers and counts use open ones.
+  const boardTasks = tasks;
+  if (board) tasks = tasks.filter((x) => !x.completed_at);
   const t = todayStr();
   const nodes = [];
 
@@ -624,7 +793,7 @@ async function renderView() {
     location.hash = '#/today';
     return;
   }
-  fill(content, ...nodes);
+  fill(content, ...(board ? renderBoard(boardTasks) : nodes));
 }
 
 async function renderMemory(content) {
@@ -742,8 +911,8 @@ async function openTask(id) {
   const wasOpen = Boolean(state.openId);
   if (!wasOpen) drawerOpener = document.activeElement;
   state.openId = id;
-  document.querySelectorAll('.task.selected').forEach((el) => el.classList.remove('selected'));
-  document.querySelectorAll(`.task[data-id="${CSS.escape(id)}"]`).forEach((el) => el.classList.add('selected'));
+  document.querySelectorAll('.task.selected, .card-task.selected').forEach((el) => el.classList.remove('selected'));
+  document.querySelectorAll(`.task[data-id="${CSS.escape(id)}"], .card-task[data-id="${CSS.escape(id)}"]`).forEach((el) => el.classList.add('selected'));
   await renderDrawer();
   // Move keyboard focus into the panel, so Tab continues where the eye goes.
   $('#drawer [data-fk="close"]')?.focus({ preventScroll: true });
@@ -756,9 +925,9 @@ function closeDrawer() {
   d.classList.remove('open');
   d.setAttribute('aria-hidden', 'true');
   d.replaceChildren();
-  document.querySelectorAll('.task.selected').forEach((el) => el.classList.remove('selected'));
+  document.querySelectorAll('.task.selected, .card-task.selected').forEach((el) => el.classList.remove('selected'));
   // Return focus to the row that opened the panel (or its replacement after a re-render).
-  const target = (drawerOpener?.isConnected && drawerOpener) || (id && $(`.task[data-id="${CSS.escape(id)}"]`));
+  const target = (drawerOpener?.isConnected && drawerOpener) || (id && $(`.task[data-id="${CSS.escape(id)}"], .card-task[data-id="${CSS.escape(id)}"]`));
   target?.focus?.({ preventScroll: true });
   drawerOpener = null;
 }
@@ -814,6 +983,13 @@ async function renderDrawer() {
       title: ['', 'Urgent', 'High', 'Medium', 'None'][n],
       onclick: () => patch(t.id, { priority: n }),
     }, n < 4 ? icon('flag', { size: 12 }) : null, `P${n}`)));
+
+  const col = columnOf(t);
+  const statusSet = t.deleted_at ? h('span', { class: 'hint' }, 'In trash') : h('div', { class: 'seg', role: 'group', 'aria-labelledby': fid('status-label') },
+    ...COLUMNS.map((c) => h('button', {
+      'aria-pressed': String(col === c.key), 'data-fk': `status-${c.key}`,
+      onclick: () => moveTo(t, c.key),
+    }, h('span', { class: `col-dot ${c.key}`, 'aria-hidden': 'true' }), c.title)));
 
   const project = h('select', { id: fid('project'), disabled: Boolean(t.parent_id), 'data-fk': 'project', onchange: (e) => patch(t.id, { project_id: e.target.value }) },
     ...state.boot.projects.map((p) => h('option', { value: p.id, selected: p.id === t.project_id }, p.name)));
@@ -888,6 +1064,7 @@ async function renderDrawer() {
       title),
     desc,
     h('div', { class: 'fields' },
+      h('span', { id: fid('status-label'), class: 'field-name' }, 'Status'), statusSet,
       h('label', { for: fid('due') }, 'Due'), h('div', {}, due, h('div', { class: 'hint', id: fid('due-hint') }, dueHint)),
       h('span', { id: fid('prio-label'), class: 'field-name' }, 'Priority'), prio,
       h('label', { for: fid('project') }, 'Project'), h('div', { class: 'field-row' }, project, section),

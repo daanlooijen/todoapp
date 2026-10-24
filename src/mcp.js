@@ -15,7 +15,7 @@ const server = new McpServer(
   { name: 'taskline', version: '0.1.0' },
   {
     instructions: `Taskline is the user's personal task manager. Call get_overview first to learn today's date, projects, labels and the user's remembered preferences.
-Priority 1 is most urgent, 4 is none. Dates are YYYY-MM-DD; the "due" field also accepts phrases like "tomorrow 5pm" or "every weekday".
+Tasks sit on a board: status is todo or doing while open, and done once completed (use move_task). Priority 1 is most urgent, 4 is none. Dates are YYYY-MM-DD; the "due" field also accepts phrases like "tomorrow 5pm" or "every weekday".
 Completing a recurring task moves it to its next date. Deletes go to a 30-day trash and can be undone with restore_task.
 When the user states a lasting preference about how they work, save it with remember.`,
   },
@@ -38,6 +38,7 @@ const readOnly = { readOnlyHint: true };
 // Trims tasks to the fields an agent needs, keeping responses small.
 const slim = (t) => ({
   id: t.id, content: t.content, ...(t.description && { description: t.description }), priority: t.priority,
+  status: t.completed_at ? 'done' : t.status,
   project: t.project_name, ...(t.section_name && { section: t.section_name }), ...(t.parent_id && { parent_id: t.parent_id }),
   ...(t.due_date && { due_date: t.due_date }), ...(t.due_time && { due_time: t.due_time }), ...(t.recurrence && { recurrence: t.recurrence }),
   ...(t.deadline && { deadline: t.deadline }), ...(t.duration_min && { duration_min: t.duration_min }),
@@ -59,6 +60,7 @@ const TaskInput = {
   deadline: z.string().optional().describe('Hard deadline YYYY-MM-DD, separate from the planned due date'),
   duration_min: z.number().int().optional().describe('Estimated minutes'),
   labels: z.array(z.string()).optional(),
+  status: z.enum(['todo', 'doing']).optional().describe('Board column (default todo)'),
 };
 
 tool('get_overview', 'Snapshot of the task system: today\'s date, counts (overdue, due today, inbox), projects, labels and remembered user preferences. Start here.',
@@ -71,11 +73,12 @@ tool('list_tasks', 'List tasks. view: today (incl. overdue), upcoming, inbox, pr
     label: z.string().optional(),
     query: z.string().optional(),
     days: z.number().int().min(1).max(365).optional().describe('Horizon for view=upcoming (default 14)'),
+    status: z.enum(['todo', 'doing']).optional().describe('Only open tasks in this board column'),
     limit: z.number().int().min(1).max(500).optional(),
   },
-  ({ view, project, label, query, days, limit }) => {
+  ({ view, project, label, query, days, limit, status }) => {
     const project_id = project ? store.findProjectByName(project).id : undefined;
-    return store.listTasks({ view, project_id, label, q: query, days, limit: limit ?? 200 }).map(slim);
+    return store.listTasks({ view, project_id, label, q: query, days, status, limit: limit ?? 200 }).map(slim);
   }, readOnly);
 
 tool('get_task', 'Full details of one task, including subtasks, comments and its change history.',
@@ -118,6 +121,9 @@ tool('update_task', 'Change fields of a task. Only the fields you pass are chang
   },
   ({ id, ...patch }) => slim(store.updateTask(id, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), ACTOR)));
 
+tool('move_task', 'Move a task to a board column: todo, doing, or done (done completes it; recurring tasks then move to their next date).',
+  { id: z.string(), status: z.enum(['todo', 'doing', 'done']) },
+  ({ id, status }) => slim(store.moveTask(id, status, ACTOR)));
 tool('complete_task', 'Mark a task done. Recurring tasks move to their next date instead.', { id: z.string() },
   ({ id }) => slim(store.completeTask(id, ACTOR)));
 tool('reopen_task', 'Mark a completed task as not done.', { id: z.string() },

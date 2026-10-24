@@ -94,3 +94,28 @@ test('memory and overview', () => {
   assert.equal(o.counts.inbox, 0);
   assert.equal(s.listActivity({ limit: 1 })[0].actor, 'mcp');
 });
+
+test('board: moving between todo, doing and done', () => {
+  const s = fresh();
+  const t = s.createTask({ content: 'Write post' });
+  assert.equal(t.status, 'todo');
+  assert.equal(s.moveTask(t.id, 'doing').status, 'doing');
+  assert.equal(s.listTasks({ view: 'inbox', status: 'doing' }).length, 1);
+  assert.ok(s.moveTask(t.id, 'done').completed_at);
+  assert.equal(s.listTasks({ view: 'inbox' }).length, 0);
+  assert.equal(s.listTasks({ view: 'inbox', done_days: 7 }).length, 1); // shows in Done column
+  const back = s.moveTask(t.id, 'todo');
+  assert.equal(back.completed_at, null);
+  assert.equal(back.status, 'todo');
+  assert.equal(s.listActivity({ limit: 1 })[0].summary, 'Moved "Write post" to To do');
+  assert.throws(() => s.moveTask(t.id, 'blocked'), ValidationError);
+});
+
+test('board: a recurring task dropped in done advances and returns to todo', () => {
+  const s = fresh();
+  const t = s.createTask({ content: 'Standup', recurrence: 'every day', due_date: fmtDate(new Date()), status: 'doing' });
+  const after = s.moveTask(t.id, 'done');
+  assert.equal(after.completed_at, null);
+  assert.equal(after.status, 'todo');
+  assert.equal(after.due_date, fmtDate(addDays(new Date(), 1)));
+});
