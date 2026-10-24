@@ -32,7 +32,7 @@
 
 ## Quick start
 
-You need [Node.js](https://nodejs.org) 22.13 or newer. Nothing else: no database server, no compiler.
+You need [Node.js](https://nodejs.org) 22.13 or newer, on a release line that still gets security updates (22, 24 or 26; the odd-numbered lines like 25 are short-lived). The installer from nodejs.org is the easiest way to get it. Nothing else: no database server, no compiler.
 
 ```bash
 git clone https://github.com/daanlooijen/todoapp.git
