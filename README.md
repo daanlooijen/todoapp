@@ -66,6 +66,24 @@ Call mom friday 5pm #Family @phone p2 // ask about the weekend
 
 Keyboard shortcuts: `q` or `n` add a task, `s` smart add, `/` search, `Esc` close.
 
+## The AI board
+
+Switch any view to **Board** to see tickets move through a workflow where Claude does the work and you keep control of every hand-off:
+
+| Column | Who | What happens |
+|---|---|---|
+| Backlog | you | Tickets you collect. The AI never touches these |
+| Ready for AI | you | Moving a ticket here releases it to the AI. Then click **Run AI** |
+| AI working | Claude | Claude works through the ticket and posts progress notes on the card |
+| Needs review | you | The draft is in its folder; review it in the app or click **Open folder** |
+| Done | you | Approve it, or comment what to change and click **Send back to AI** |
+
+Claude writes data engineering drafts: SQL and dbt models with tests, Python pipelines, APIs, data quality checks and design docs, always with a README listing assumptions and open questions. Describe the goal, inputs and expected output in the ticket description; the more context, the better the draft.
+
+Drafts go to `~/Documents/Taskline Drafts/<ticket>/` (change with `TASKLINE_DRAFTS_DIR`). Set `TASKLINE_REFERENCE_DIR` to an existing project (for example your dbt repo) and Claude reads it, read-only, to match your conventions.
+
+**What the AI can and cannot do.** It only has the tools Taskline gives it: read the ticket, read and write files in that ticket's draft folder, read the optional reference folder, and post progress notes. It cannot run code or shell commands, reach the internet or your databases, or write anywhere else: paths are confined to the ticket folder (no `..`, absolute paths or symlinks), only text file types are allowed, and files that look like secrets (`.env`, keys, credentials) are never read. Each run is capped in steps and time, can be cancelled, and is logged with its token usage. Runs use your Anthropic API key, so they cost API credits.
+
 ## Connect Claude (MCP)
 
 The MCP server runs as its own process and shares the same database, so it works whether or not the web app is open. Replace `/path/to/todoapp` with where you cloned the repo.
@@ -143,6 +161,7 @@ Taskline has no login, so it's built to be reachable only from your own computer
 - **No hijacking by websites**: requests with an unexpected `Host` header are rejected (this blocks DNS rebinding), and a site you visit can't send writes to Taskline (an `Origin` check plus JSON-only requests block cross-site request forgery).
 - **No script injection**: task text is always displayed as plain text, and a strict Content Security Policy blocks any script that doesn't come from Taskline itself.
 - **Keys stay on the server**: your API key is read from `.env` by the server and never sent to the browser.
+- **The AI worker is boxed in**: it can only write inside one ticket's draft folder and has no shell, network or database access (see [The AI board](#the-ai-board)).
 - **AI output is checked**: everything the AI suggests is validated before it's saved, and Smart add and Plan my day show you their proposals first.
 - **Private data folder**: on macOS and Linux the data folder is readable by your user account only.
 

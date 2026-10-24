@@ -88,10 +88,27 @@ const MIGRATIONS = [
   );
   CREATE INDEX activity_entity ON activity(entity, entity_id);
   `,
-  // v2: kanban status for open tasks. "Done" is completed_at, not a status value.
+  // v2: board columns and the AI worker. "Done" is completed_at, not a status value.
+  // Status values are validated in store.js (not a CHECK constraint) so columns can evolve
+  // without rebuilding the table.
   `
-  ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'doing'));
+  ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'backlog';
+  ALTER TABLE tasks ADD COLUMN draft_dir TEXT;
   CREATE INDEX tasks_status ON tasks(status) WHERE completed_at IS NULL AND deleted_at IS NULL;
+  CREATE TABLE ai_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,            -- running | succeeded | failed | cancelled
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    summary TEXT,
+    error TEXT,
+    files TEXT,                      -- JSON array of relative paths written
+    turns INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX ai_runs_task ON ai_runs(task_id, started_at);
   `,
 ];
 

@@ -11,10 +11,11 @@ export class ValidationError extends Error {}
 
 export const COLORS = ['slate', 'red', 'orange', 'amber', 'green', 'teal', 'blue', 'indigo', 'violet', 'pink'];
 export const ACTORS = ['user', 'ai', 'mcp'];
-// Board columns. "done" is not stored here: a task is done when completed_at is set,
+// Board columns, in order. "done" is not stored here: a task is done when completed_at is set,
 // so completion keeps one source of truth (and recurring tasks keep working).
-export const STATUSES = ['todo', 'doing'];
-const STATUS_NAMES = { todo: 'To do', doing: 'Doing', done: 'Done' };
+//   backlog -> ready (you release it to the AI) -> working -> review (draft ready) -> done
+export const STATUSES = ['backlog', 'ready', 'working', 'review'];
+export const STATUS_NAMES = { backlog: 'Backlog', ready: 'Ready for AI', working: 'AI working', review: 'Needs review', done: 'Done' };
 
 const newId = () => randomBytes(9).toString('base64url');
 const now = () => new Date().toISOString();
@@ -79,7 +80,9 @@ const TASK_SELECT = `
     (SELECT json_group_array(l.name) FROM task_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.task_id = t.id) AS labels_json,
     (SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id AND c.deleted_at IS NULL) AS subtask_count,
     (SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id AND c.deleted_at IS NULL AND c.completed_at IS NOT NULL) AS subtask_done,
-    (SELECT COUNT(*) FROM comments cm WHERE cm.task_id = t.id) AS comment_count
+    (SELECT COUNT(*) FROM comments cm WHERE cm.task_id = t.id) AS comment_count,
+    (SELECT r.status FROM ai_runs r WHERE r.task_id = t.id ORDER BY r.started_at DESC LIMIT 1) AS ai_run_status,
+    (SELECT cm.body FROM comments cm WHERE cm.task_id = t.id AND cm.author = 'ai' ORDER BY cm.created_at DESC LIMIT 1) AS ai_last_note
   FROM tasks t
   JOIN projects p ON p.id = t.project_id
   LEFT JOIN sections s ON s.id = t.section_id`;
@@ -459,10 +462,10 @@ export class Store {
     const parentId = v.parent_id ?? null;
     const pos = v.position ?? this.get('SELECT COALESCE(MAX(position), 0) + 1 AS n FROM tasks WHERE project_id = ? AND parent_id IS ?', projectId, parentId).n;
     this.run(`INSERT INTO tasks (id, content, description, project_id, section_id, parent_id, position, priority,
-                due_date, due_time, recurrence, deadline, duration_min, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                due_date, due_time, recurrence, deadline, duration_min, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id, v.content, v.description ?? '', projectId, v.section_id ?? null, parentId, pos, v.priority ?? 4,
-      v.due_date ?? null, v.due_time ?? null, v.recurrence ?? null, v.deadline ?? null, v.duration_min ?? null, t, t);
+      v.due_date ?? null, v.due_time ?? null, v.recurrence ?? null, v.deadline ?? null, v.duration_min ?? null, v.status ?? 'backlog', t, t);
     for (const name of f.labels ?? []) this.run('INSERT OR IGNORE INTO task_labels (task_id, label_id) VALUES (?, ?)', id, this.labelId(name));
     this.log(actor, 'create', 'task', id, `Added "${v.content}"`);
 
@@ -511,8 +514,8 @@ export class Store {
       if (t.completed_at) return t;
       if (t.recurrence) {
         const next = nextDue(t.recurrence, t.due_date);
-        // The next occurrence starts fresh in To do.
-        this.run("UPDATE tasks SET due_date = ?, status = 'todo', updated_at = ? WHERE id = ?", next, now(), id);
+        // The next occurrence starts fresh in the backlog.
+        this.run("UPDATE tasks SET due_date = ?, status = 'backlog', updated_at = ? WHERE id = ?", next, now(), id);
         this.run('UPDATE tasks SET completed_at = NULL WHERE parent_id = ?', id);
         this.log(actor, 'complete', 'task', id, `Completed "${t.content}" (next: ${next})`, { recurring: true, was_due: t.due_date, next_due: next });
       } else {
@@ -578,6 +581,77 @@ export class Store {
       this.log(actor, 'restore', 'task', id, `Restored "${t.content}"`);
       return this.getTask(id);
     });
+  }
+
+  // ---------- AI runs ----------
+  // A run is one attempt by the AI worker on one ticket. Only tickets you moved to
+  // "Ready for AI" can start a run: that move is your explicit approval.
+
+  getRun(id) {
+    const r = this.get('SELECT * FROM ai_runs WHERE id = ?', id);
+    if (!r) throw new NotFoundError(`Run ${id} not found`);
+    return { ...r, files: r.files ? JSON.parse(r.files) : [] };
+  }
+
+  listRuns(taskId) {
+    return this.all('SELECT * FROM ai_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 20', taskId)
+      .map((r) => ({ ...r, files: r.files ? JSON.parse(r.files) : [] }));
+  }
+
+  startRun(taskId, draftDir) {
+    return this.tx(() => {
+      const t = this.getTask(taskId);
+      if (t.deleted_at || t.completed_at) throw new ValidationError('This ticket is closed.');
+      if (t.status !== 'ready') throw new ValidationError('Move the ticket to "Ready for AI" first. That move is what releases it to the AI.');
+      if (this.get("SELECT 1 AS x FROM ai_runs WHERE task_id = ? AND status = 'running'", taskId)) {
+        throw new ValidationError('The AI is already working on this ticket.');
+      }
+      const id = newId();
+      const at = now();
+      this.run("INSERT INTO ai_runs (id, task_id, status, started_at) VALUES (?, ?, 'running', ?)", id, taskId, at);
+      this.run("UPDATE tasks SET status = 'working', draft_dir = COALESCE(draft_dir, ?), updated_at = ? WHERE id = ?", draftDir, at, taskId);
+      this.log('ai', 'ai_start', 'task', taskId, `AI started on "${t.content}"`, { run_id: id });
+      return this.getRun(id);
+    });
+  }
+
+  recordRunProgress(runId, { turns, input_tokens, output_tokens }) {
+    this.run('UPDATE ai_runs SET turns = ?, input_tokens = ?, output_tokens = ? WHERE id = ?', turns, input_tokens, output_tokens, runId);
+  }
+
+  finishRun(runId, { summary, files }) {
+    return this.tx(() => {
+      const r = this.getRun(runId);
+      const t = this.getTask(r.task_id);
+      const at = now();
+      this.run("UPDATE ai_runs SET status = 'succeeded', finished_at = ?, summary = ?, files = ? WHERE id = ?", at, summary, JSON.stringify(files), runId);
+      if (!t.completed_at && !t.deleted_at) this.run("UPDATE tasks SET status = 'review', updated_at = ? WHERE id = ?", at, t.id);
+      const list = files.length ? `\n\nFiles:\n${files.map((f) => `- ${f}`).join('\n')}` : '';
+      this.run('INSERT INTO comments (id, task_id, body, author, created_at) VALUES (?, ?, ?, ?, ?)', newId(), t.id, `Draft ready for review.\n\n${summary}${list}`, 'ai', at);
+      this.log('ai', 'ai_finish', 'task', t.id, `AI finished a draft for "${t.content}" (${files.length} files)`, { run_id: runId });
+      return this.getRun(runId);
+    });
+  }
+
+  // A failed or cancelled run hands the ticket back to "Ready for AI" so it can be retried.
+  failRun(runId, error, { cancelled = false } = {}) {
+    return this.tx(() => {
+      const r = this.getRun(runId);
+      if (r.status !== 'running') return r;
+      const t = this.getTask(r.task_id);
+      const at = now();
+      this.run('UPDATE ai_runs SET status = ?, finished_at = ?, error = ? WHERE id = ?', cancelled ? 'cancelled' : 'failed', at, error, runId);
+      if (!t.completed_at && !t.deleted_at && t.status === 'working') this.run("UPDATE tasks SET status = 'ready', updated_at = ? WHERE id = ?", at, t.id);
+      this.run('INSERT INTO comments (id, task_id, body, author, created_at) VALUES (?, ?, ?, ?, ?)', newId(), t.id,
+        cancelled ? 'Run cancelled. The ticket is back in Ready for AI.' : `Run failed: ${error}\n\nThe ticket is back in Ready for AI, so you can try again.`, 'ai', at);
+      this.log('ai', cancelled ? 'ai_cancel' : 'ai_fail', 'task', t.id, `AI ${cancelled ? 'cancelled' : 'failed'} on "${t.content}"`, { run_id: runId, error });
+      return this.getRun(runId);
+    });
+  }
+
+  // Runs live in the web server's memory; if it stopped mid-run, mark those runs as interrupted.
+  recoverInterruptedRuns() {
+    for (const r of this.all("SELECT id FROM ai_runs WHERE status = 'running'")) this.failRun(r.id, 'Taskline was stopped while the AI was working.');
   }
 
   // ---------- comments ----------
@@ -690,6 +764,7 @@ export class Store {
       task_labels: this.all('SELECT * FROM task_labels'),
       comments: this.all('SELECT * FROM comments'),
       memory: this.all('SELECT * FROM memory'),
+      ai_runs: this.all('SELECT * FROM ai_runs'),
     };
   }
 }

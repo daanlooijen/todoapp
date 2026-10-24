@@ -15,7 +15,7 @@ const server = new McpServer(
   { name: 'taskline', version: '0.1.0' },
   {
     instructions: `Taskline is the user's personal task manager. Call get_overview first to learn today's date, projects, labels and the user's remembered preferences.
-Tasks sit on a board: status is todo or doing while open, and done once completed (use move_task). Priority 1 is most urgent, 4 is none. Dates are YYYY-MM-DD; the "due" field also accepts phrases like "tomorrow 5pm" or "every weekday".
+Tasks sit on a board: backlog -> ready (released to the AI worker) -> working -> review -> done. Use move_task; done completes the task. Priority 1 is most urgent, 4 is none. Dates are YYYY-MM-DD; the "due" field also accepts phrases like "tomorrow 5pm" or "every weekday".
 Completing a recurring task moves it to its next date. Deletes go to a 30-day trash and can be undone with restore_task.
 When the user states a lasting preference about how they work, save it with remember.`,
   },
@@ -60,7 +60,7 @@ const TaskInput = {
   deadline: z.string().optional().describe('Hard deadline YYYY-MM-DD, separate from the planned due date'),
   duration_min: z.number().int().optional().describe('Estimated minutes'),
   labels: z.array(z.string()).optional(),
-  status: z.enum(['todo', 'doing']).optional().describe('Board column (default todo)'),
+  status: z.enum(['backlog', 'ready', 'working', 'review']).optional().describe('Board column (default backlog)'),
 };
 
 tool('get_overview', 'Snapshot of the task system: today\'s date, counts (overdue, due today, inbox), projects, labels and remembered user preferences. Start here.',
@@ -73,7 +73,7 @@ tool('list_tasks', 'List tasks. view: today (incl. overdue), upcoming, inbox, pr
     label: z.string().optional(),
     query: z.string().optional(),
     days: z.number().int().min(1).max(365).optional().describe('Horizon for view=upcoming (default 14)'),
-    status: z.enum(['todo', 'doing']).optional().describe('Only open tasks in this board column'),
+    status: z.enum(['backlog', 'ready', 'working', 'review']).optional().describe('Only open tasks in this board column'),
     limit: z.number().int().min(1).max(500).optional(),
   },
   ({ view, project, label, query, days, limit, status }) => {
@@ -121,8 +121,8 @@ tool('update_task', 'Change fields of a task. Only the fields you pass are chang
   },
   ({ id, ...patch }) => slim(store.updateTask(id, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), ACTOR)));
 
-tool('move_task', 'Move a task to a board column: todo, doing, or done (done completes it; recurring tasks then move to their next date).',
-  { id: z.string(), status: z.enum(['todo', 'doing', 'done']) },
+tool('move_task', 'Move a task to a board column: backlog, ready (releases it to the AI worker), working, review, or done (done completes it; recurring tasks then move to their next date).',
+  { id: z.string(), status: z.enum(['backlog', 'ready', 'working', 'review', 'done']) },
   ({ id, status }) => slim(store.moveTask(id, status, ACTOR)));
 tool('complete_task', 'Mark a task done. Recurring tasks move to their next date instead.', { id: z.string() },
   ({ id }) => slim(store.completeTask(id, ACTOR)));

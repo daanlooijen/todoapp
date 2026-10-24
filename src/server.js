@@ -1,14 +1,18 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
+import { cancelRun, draftListing, PathError, readDraftFile, startRun } from './agent.js';
 import { AIError, aiStatus, breakdown, capture, planDay } from './ai.js';
 import { backupStatus, runBackup, scheduleBackups } from './backup.js';
-import { DATA_DIR, HOST, PORT, ROOT } from './config.js';
+import { DATA_DIR, DRAFTS_DIR, HOST, PORT, REFERENCE_DIR, ROOT } from './config.js';
 import { openDb } from './db.js';
 import { COLORS, NotFoundError, Store, ValidationError } from './store.js';
 import { parseQuickAdd } from './shared/quickadd.js';
 
 const db = openDb();
 const store = new Store(db);
+store.recoverInterruptedRuns();
 const app = express();
 app.disable('x-powered-by');
 
@@ -55,6 +59,8 @@ api.get('/bootstrap', (req, res) => {
     colors: COLORS,
     ai: aiStatus(),
     data_dir: DATA_DIR,
+    drafts_dir: DRAFTS_DIR,
+    reference_dir: REFERENCE_DIR,
     backup: backupStatus(),
     counts: store.overview().counts,
     activity_head: store.activityHead(),
@@ -117,6 +123,29 @@ api.post('/ai/capture', async (req, res) => {
 api.post('/ai/breakdown/:id', async (req, res) => res.status(201).json(await breakdown(store, req.params.id)));
 api.post('/ai/plan', async (req, res) => res.json(await planDay(store)));
 
+// AI worker on board tickets
+api.post('/tasks/:id/ai-run', (req, res) => res.status(202).json(startRun(store, req.params.id)));
+api.post('/tasks/:id/ai-run/cancel', (req, res) => {
+  if (cancelRun(store, req.params.id)) return res.json({ ok: true });
+  const stale = store.listRuns(req.params.id).find((r) => r.status === 'running');
+  if (stale) return res.json(store.failRun(stale.id, 'Cancelled.', { cancelled: true }));
+  res.status(409).json({ error: 'The AI is not working on this ticket.' });
+});
+api.get('/tasks/:id/ai', (req, res) => {
+  const task = store.getTask(req.params.id);
+  res.json({ runs: store.listRuns(task.id), drafts: draftListing(task) });
+});
+api.get('/tasks/:id/drafts/file', (req, res) => res.json(readDraftFile(store.getTask(req.params.id), String(req.query.path ?? ''))));
+// Opens the ticket's draft folder in Finder / Explorer. The path comes from the database (set by
+// the server when the run started), never from the request, and is passed as an argument, not via a shell.
+api.post('/tasks/:id/drafts/open', (req, res) => {
+  const dir = store.getTask(req.params.id).draft_dir;
+  if (!dir || !fs.existsSync(dir)) return res.status(404).json({ error: 'This ticket has no draft folder yet.' });
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
+  spawn(cmd, [dir], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+  res.json({ ok: true, dir });
+});
+
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -126,6 +155,7 @@ app.use((err, req, res, _next) => {
   if (err instanceof ValidationError) return res.status(400).json({ error: err.message });
   if (err instanceof NotFoundError) return res.status(404).json({ error: err.message });
   if (err instanceof AIError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof PathError) return res.status(400).json({ error: err.message });
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' });
   if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request too large' });
   console.error(err);

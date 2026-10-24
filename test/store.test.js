@@ -95,27 +95,64 @@ test('memory and overview', () => {
   assert.equal(s.listActivity({ limit: 1 })[0].actor, 'mcp');
 });
 
-test('board: moving between todo, doing and done', () => {
+test('board: moving between columns and done', () => {
   const s = fresh();
   const t = s.createTask({ content: 'Write post' });
-  assert.equal(t.status, 'todo');
-  assert.equal(s.moveTask(t.id, 'doing').status, 'doing');
-  assert.equal(s.listTasks({ view: 'inbox', status: 'doing' }).length, 1);
+  assert.equal(t.status, 'backlog');
+  assert.equal(s.moveTask(t.id, 'ready').status, 'ready');
+  assert.equal(s.listTasks({ view: 'inbox', status: 'ready' }).length, 1);
   assert.ok(s.moveTask(t.id, 'done').completed_at);
   assert.equal(s.listTasks({ view: 'inbox' }).length, 0);
   assert.equal(s.listTasks({ view: 'inbox', done_days: 7 }).length, 1); // shows in Done column
-  const back = s.moveTask(t.id, 'todo');
+  const back = s.moveTask(t.id, 'review');
   assert.equal(back.completed_at, null);
-  assert.equal(back.status, 'todo');
-  assert.equal(s.listActivity({ limit: 1 })[0].summary, 'Moved "Write post" to To do');
+  assert.equal(back.status, 'review');
+  assert.equal(s.listActivity({ limit: 1 })[0].summary, 'Moved "Write post" to Needs review');
   assert.throws(() => s.moveTask(t.id, 'blocked'), ValidationError);
 });
 
-test('board: a recurring task dropped in done advances and returns to todo', () => {
+test('board: a recurring task dropped in done advances and returns to backlog', () => {
   const s = fresh();
-  const t = s.createTask({ content: 'Standup', recurrence: 'every day', due_date: fmtDate(new Date()), status: 'doing' });
+  const t = s.createTask({ content: 'Standup', recurrence: 'every day', due_date: fmtDate(new Date()), status: 'working' });
   const after = s.moveTask(t.id, 'done');
   assert.equal(after.completed_at, null);
-  assert.equal(after.status, 'todo');
+  assert.equal(after.status, 'backlog');
   assert.equal(after.due_date, fmtDate(addDays(new Date(), 1)));
+});
+
+test('AI runs: only released tickets start, and outcomes move the ticket', () => {
+  const s = fresh();
+  const t = s.createTask({ content: 'Build orders mart' });
+  assert.throws(() => s.startRun(t.id, '/tmp/x'), /Ready for AI/); // backlog is not approval
+  s.moveTask(t.id, 'ready');
+  const run = s.startRun(t.id, '/tmp/drafts/abc');
+  assert.equal(s.getTask(t.id).status, 'working');
+  assert.equal(s.getTask(t.id).draft_dir, '/tmp/drafts/abc');
+  assert.throws(() => s.startRun(t.id, '/tmp/x'), ValidationError); // no double runs
+  s.finishRun(run.id, { summary: 'Added models', files: ['README.md', 'models/fct_orders.sql'] });
+  const done = s.getTask(t.id, { withChildren: true });
+  assert.equal(done.status, 'review');
+  assert.match(done.comments.at(-1).body, /fct_orders\.sql/);
+  assert.equal(done.ai_run_status, 'succeeded');
+
+  s.moveTask(t.id, 'ready');
+  const r2 = s.startRun(t.id, '/tmp/other');
+  assert.equal(s.getTask(t.id).draft_dir, '/tmp/drafts/abc'); // the folder sticks across runs
+  s.failRun(r2.id, 'boom');
+  assert.equal(s.getTask(t.id).status, 'ready');
+  assert.equal(s.getRun(r2.id).status, 'failed');
+});
+
+test('AI runs: interrupted runs are recovered on startup', () => {
+  const s = fresh();
+  const t = s.createTask({ content: 'x', status: 'ready' });
+  const run = s.startRun(t.id, '/tmp/d');
+  s.recoverInterruptedRuns();
+  assert.equal(s.getRun(run.id).status, 'failed');
+  assert.equal(s.getTask(t.id).status, 'ready');
+});
+
+test('a task can be created straight into a board column', () => {
+  const s = fresh();
+  assert.equal(s.createTask({ content: 'x', status: 'review' }).status, 'review');
 });

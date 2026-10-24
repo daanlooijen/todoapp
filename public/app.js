@@ -55,7 +55,7 @@ const prefs = {
 const state = {
   boot: null, route: { kind: 'today', arg: '' }, openId: null, head: 0,
   layout: prefs.get('taskline.layout') === 'board' ? 'board' : 'list',
-  boardTab: 'todo',
+  boardTab: 'backlog',
 };
 const todayStr = () => fmtDate(new Date());
 const projectById = (id) => state.boot.projects.find((p) => p.id === id);
@@ -206,7 +206,7 @@ function dueClass(date) {
 // The small line under a task title: date, priority, progress, labels, project.
 function taskMeta(t, { showProject = true, showStatus = true } = {}) {
   const meta = h('div', { class: 'meta' });
-  if (showStatus && !t.completed_at && t.status === 'doing') meta.append(h('span', { class: 'badge doing' }, 'In progress'));
+  if (showStatus && !t.completed_at && t.status !== 'backlog') meta.append(h('span', { class: `badge status-${t.status}` }, COLUMN_NAMES[t.status] ?? t.status));
   if (t.due_date) {
     const cls = dueClass(t.due_date);
     meta.append(h('span', { class: `due ${cls}` },
@@ -334,12 +334,24 @@ function skeleton(rows = 4) {
 
 // ---------- board ----------
 
+// You own the hand-offs: moving a ticket to "Ready for AI" releases it, and every draft
+// stops in "Needs review" until you approve it.
 const COLUMNS = [
-  { key: 'todo', title: 'To do', empty: 'Nothing waiting. Add a task below.' },
-  { key: 'doing', title: 'Doing', empty: 'Drag a card here when you start on it.' },
-  { key: 'done', title: 'Done', sub: 'last 7 days', empty: 'Finished tasks land here.' },
+  { key: 'backlog', title: 'Backlog', short: 'Backlog', empty: 'New tickets start here.' },
+  { key: 'ready', title: 'Ready for AI', short: 'Ready', empty: 'Move a ticket here to release it to the AI.' },
+  { key: 'working', title: 'AI working', short: 'AI', empty: 'Click Run AI on a ready ticket.' },
+  { key: 'review', title: 'Needs review', short: 'Review', empty: 'Drafts waiting for you show up here.' },
+  { key: 'done', title: 'Done', short: 'Done', sub: 'last 7 days', empty: 'Approved tickets land here.' },
 ];
-const COLUMN_NAMES = { todo: 'To do', doing: 'Doing', done: 'Done' };
+const COLUMN_NAMES = Object.fromEntries(COLUMNS.map((c) => [c.key, c.title]));
+
+async function runAI(t) {
+  try {
+    await api('POST', `/tasks/${t.id}/ai-run`);
+    toast(`Claude started on "${t.content}"`);
+    await refresh();
+  } catch (e) { showError(e); }
+}
 const columnOf = (t) => (t.completed_at ? 'done' : t.status);
 let dragging = null;
 
@@ -406,10 +418,22 @@ function card(t) {
     onclick: (e) => { e.stopPropagation(); moveTo(t, done ? 'todo' : 'done'); },
   }, icon('check', { size: 12 }));
   const meta = taskMeta(t, { showStatus: false });
+  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
+  let ai = null;
+  if (col === 'ready') {
+    ai = h('div', { class: 'card-ai' },
+      t.ai_run_status === 'failed' ? h('span', { class: 'badge danger' }, 'Last run failed') : null,
+      h('button', { class: 'btn ai small', onclick: stop(() => runAI(t)) }, icon('sparkles', { size: 13 }), 'Run AI'));
+  } else if (col === 'working' && t.ai_run_status === 'running') {
+    ai = h('div', { class: 'card-ai live', role: 'status' }, spinner(), h('span', {}, t.ai_last_note?.split('\n')[0] ?? 'Claude is working...'));
+  } else if (col === 'review' && t.draft_dir) {
+    ai = h('div', { class: 'card-ai' }, h('button', { class: 'btn small', onclick: stop(() => openTask(t.id)) }, icon('note', { size: 13 }), 'Review draft'));
+  }
   fill(el,
     h('div', { class: 'card-top' }, check, h('div', { class: 'card-title' }, t.content)),
     t.description ? h('div', { class: 'task-desc' }, t.description.split('\n')[0]) : null,
     meta.childNodes.length ? meta : null,
+    ai,
   );
   return el;
 }
@@ -424,7 +448,7 @@ function boardColumn(c, list) {
     h('div', { class: 'col-body' },
       ...list.map(card),
       list.length ? null : h('div', { class: 'col-empty' }, c.empty)),
-    c.key === 'done' ? null : inlineAdd({ ...routeDefaults(), status: c.key }, c.key === 'doing' ? 'Add task in progress' : 'Add task'));
+    ['backlog', 'ready'].includes(c.key) ? inlineAdd({ ...routeDefaults(), status: c.key }, c.key === 'ready' ? 'Add ticket for the AI' : 'Add ticket') : null);
   col.addEventListener('dragover', (e) => {
     if (!dragging) return;
     e.preventDefault();
@@ -446,7 +470,7 @@ function renderBoard(tasks) {
   // Subtasks show as progress on their parent's card, not as separate cards.
   const ids = new Set(tasks.map((t) => t.id));
   const top = tasks.filter((t) => !(t.parent_id && ids.has(t.parent_id)));
-  const by = { todo: [], doing: [], done: [] };
+  const by = Object.fromEntries(COLUMNS.map((c) => [c.key, []]));
   for (const t of top) by[columnOf(t)].push(t);
   by.done.sort((a, b) => b.completed_at.localeCompare(a.completed_at));
 
@@ -459,7 +483,7 @@ function renderBoard(tasks) {
       board.dataset.tab = c.key;
       e.currentTarget.parentElement.querySelectorAll('[role=tab]').forEach((b) => b.setAttribute('aria-selected', String(b === e.currentTarget)));
     },
-  }, c.title, h('span', { class: 'count' }, String(by[c.key].length)))));
+  }, h('span', { class: 'tab-short' }, c.short), h('span', { class: 'tab-long' }, c.title), h('span', { class: 'count' }, String(by[c.key].length)))));
   return [tabs, board];
 }
 
@@ -945,11 +969,12 @@ async function patch(id, body) {
 async function renderDrawer() {
   const d = $('#drawer');
   if (!state.openId) return closeDrawer();
-  let t, history;
+  let t, history, aiInfo;
   try {
-    [t, history] = await Promise.all([
+    [t, history, aiInfo] = await Promise.all([
       api('GET', `/tasks/${state.openId}`),
       api('GET', `/activity?entity_id=${encodeURIComponent(state.openId)}&limit=15`),
+      api('GET', `/tasks/${state.openId}/ai`),
     ]);
   } catch {
     return closeDrawer();
@@ -1072,6 +1097,7 @@ async function renderDrawer() {
       h('label', { for: fid('deadline') }, 'Deadline'), deadline,
       h('label', { for: fid('estimate') }, 'Estimate'), duration,
     ),
+    aiSection(t, aiInfo),
     h('div', { class: 'section-title' }, 'Subtasks', t.subtasks.length ? h('span', { class: 'count' }, `${subDone}/${t.subtasks.length}`) : null, h('span', { class: 'spacer' }), breakBtn),
     progress,
     ...t.subtasks.map((s) => taskRow(s, 0, { showProject: false })),
@@ -1101,6 +1127,67 @@ async function renderDrawer() {
   d.setAttribute('aria-hidden', 'false');
   if (focusKey) d.querySelector(`[data-fk="${focusKey}"]`)?.focus({ preventScroll: true });
   requestAnimationFrame(fit);
+}
+
+// The AI part of the task panel: run controls, the draft folder and its files, and run history.
+function aiSection(t, { runs, drafts }) {
+  const col = columnOf(t);
+  const running = runs.find((r) => r.status === 'running');
+  const when = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const minutes = (r) => Math.max(1, Math.round((new Date(r.finished_at ?? Date.now()) - new Date(r.started_at)) / 60000));
+  let action = null;
+  if (running) {
+    action = h('button', {
+      class: 'btn small danger', 'data-fk': 'ai-cancel',
+      onclick: async () => { try { await api('POST', `/tasks/${t.id}/ai-run/cancel`); toast('Run cancelled'); refresh(); } catch (e) { showError(e); } },
+    }, icon('x', { size: 13 }), 'Cancel run');
+  } else if (col === 'ready') {
+    action = h('button', { class: 'btn ai small', 'data-fk': 'ai-run', onclick: () => runAI(t) }, icon('sparkles', { size: 13 }), 'Run AI');
+  } else if (col === 'review') {
+    action = h('button', {
+      class: 'btn small', 'data-fk': 'ai-again', title: 'Add a comment with what to change first',
+      onclick: () => moveTo(t, 'ready'),
+    }, icon('undo', { size: 13 }), 'Send back to AI');
+  }
+
+  const files = drafts.files.map((f) => h('div', { class: 'file-row' },
+    icon('note', { size: 14 }),
+    h('span', { class: 'file-name' }, f.path),
+    h('span', { class: 'file-size' }, f.size < 1024 ? `${f.size} B` : `${(f.size / 1024).toFixed(1)} KB`),
+    h('button', { class: 'btn small', onclick: () => viewDraftFile(t, f.path) }, 'View')));
+
+  const runRows = runs.slice(0, 5).map((r) => h('div', { class: 'run-row' },
+    h('span', { class: `badge run-${r.status}` }, { running: 'Running', succeeded: 'Draft ready', failed: 'Failed', cancelled: 'Cancelled' }[r.status] ?? r.status),
+    h('span', {}, `${when(r.started_at)} · ${minutes(r)} min · ${r.turns} steps · ${Math.round((r.input_tokens + r.output_tokens) / 1000)}k tokens`),
+    r.error ? h('div', { class: 'hint run-error' }, r.error) : null));
+
+  return h('div', { class: 'ai-box' },
+    h('div', { class: 'section-title' }, icon('sparkles', { size: 13 }), 'AI work', h('span', { class: 'spacer' }), action),
+    running ? h('div', { class: 'card-ai live', role: 'status' }, spinner(), h('span', {}, t.ai_last_note?.split('\n')[0] ?? 'Claude is working...')) : null,
+    !runs.length && !drafts.files.length ? h('p', { class: 'hint' },
+      col === 'ready' ? 'Click Run AI. Claude writes a draft into its own folder, then moves the ticket to Needs review.'
+        : 'Move this ticket to Ready for AI to release it to Claude. Describe the goal, inputs and expected output in the description.') : null,
+    drafts.dir && drafts.exists ? h('div', { class: 'draft-dir' },
+      h('span', { class: 'hint', title: drafts.dir }, drafts.dir),
+      h('button', {
+        class: 'btn small', 'data-fk': 'ai-open',
+        onclick: async () => { try { await api('POST', `/tasks/${t.id}/drafts/open`); } catch (e) { showError(e); } },
+      }, icon('folder', { size: 13 }), 'Open folder')) : null,
+    files.length ? h('div', { class: 'file-list' }, ...files) : null,
+    runRows.length ? h('details', { class: 'runs' }, h('summary', {}, `Runs (${runs.length})`), ...runRows) : null);
+}
+
+async function viewDraftFile(t, rel) {
+  const body = h('div', {}, loading('Loading...'));
+  const actions = h('div', { class: 'modal-actions' },
+    h('button', { class: 'btn', onclick: async () => { try { await api('POST', `/tasks/${t.id}/drafts/open`); } catch (e) { showError(e); } } }, icon('folder', { size: 14 }), 'Open folder'));
+  const m = modal(rel, body, actions);
+  m.box.classList.add('wide');
+  actions.append(h('button', { class: 'btn primary', onclick: () => m.close() }, 'Close'));
+  try {
+    const { content } = await api('GET', `/tasks/${t.id}/drafts/file?path=${encodeURIComponent(rel)}`);
+    fill(body, h('pre', { class: 'code', tabindex: '0' }, content));
+  } catch (e) { fill(body, note(e.message)); }
 }
 
 // ---------- refresh & live updates ----------

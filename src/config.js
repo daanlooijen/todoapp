@@ -28,6 +28,13 @@ export const HOST = '127.0.0.1';
 
 export const AI_MODEL = process.env.TASKLINE_AI_MODEL || 'claude-opus-5-5';
 
+// The AI worker writes drafts here, one folder per ticket. It cannot write anywhere else.
+export const DRAFTS_DIR = path.resolve(process.env.TASKLINE_DRAFTS_DIR || path.join(os.homedir(), 'Documents', 'Taskline Drafts'));
+// Optional folder the AI may READ for context (e.g. your dbt project), never write. Off unless set.
+export const REFERENCE_DIR = process.env.TASKLINE_REFERENCE_DIR ? path.resolve(process.env.TASKLINE_REFERENCE_DIR) : null;
+export const AGENT_MAX_TURNS = Number(process.env.TASKLINE_AGENT_MAX_TURNS || 40);
+export const AGENT_MAX_CONCURRENT = Number(process.env.TASKLINE_AGENT_MAX_CONCURRENT || 2);
+
 export const SMTP = {
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
