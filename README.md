@@ -144,6 +144,9 @@ Taskline has no login, so it's built to be reachable only from your own computer
 - **No script injection**: task text is always displayed as plain text, and a strict Content Security Policy blocks any script that doesn't come from Taskline itself.
 - **Keys stay on the server**: your API key is read from `.env` by the server and never sent to the browser.
 - **AI output is checked**: everything the AI suggests is validated before it's saved, and Smart add and Plan my day show you their proposals first.
+- **Private data folder**: on macOS and Linux the data folder is readable by your user account only.
+
+One limit to know: other programs running under your own account can reach `localhost:4100` too, just like any local app without a login. Don't run Taskline on a shared or untrusted computer.
 
 Found a security issue? Please open a GitHub issue without exploit details and I'll get in touch.
 
@@ -179,3 +182,7 @@ npm test        # unit tests, using an in-memory database (never touches your da
 - A filter language for saved views (like `today & p1 & #Work`)
 - Natural-language dates in more languages (Smart add already understands any language)
 - Drag and drop reordering
+
+## License
+
+[MIT](LICENSE): free to use, change, and share, as long as the copyright notice stays included.

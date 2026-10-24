@@ -91,7 +91,12 @@ const MIGRATIONS = [
 ];
 
 export function openDb(file = DB_PATH) {
-  if (file !== ':memory:') fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (file !== ':memory:') {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    // Owner-only access: tasks and memory are personal, and other accounts on the same
+    // computer shouldn't be able to read them. Windows already scopes %APPDATA% per user.
+    if (process.platform !== 'win32') fs.chmodSync(DATA_DIR, 0o700);
+  }
   const db = new DatabaseSync(file);
   // WAL lets the web server and the MCP server use the same file at the same time;
   // busy_timeout makes one wait briefly for the other instead of failing.
