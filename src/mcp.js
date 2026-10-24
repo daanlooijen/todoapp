@@ -17,7 +17,13 @@ const server = new McpServer(
     instructions: `Taskline is the user's personal task manager. Call get_overview first to learn today's date, projects, labels and the user's remembered preferences.
 Tasks sit on a board: backlog -> ready (released to the AI worker) -> working -> review -> done. Use move_task; done completes the task. Priority 1 is most urgent, 4 is none. Dates are YYYY-MM-DD; the "due" field also accepts phrases like "tomorrow 5pm" or "every weekday".
 Completing a recurring task moves it to its next date. Deletes go to a 30-day trash and can be undone with restore_task.
-When the user states a lasting preference about how they work, save it with remember.`,
+When the user states a lasting preference about how they work, save it with remember.
+
+Ask, don't guess. Tasks and tickets must contain only what the user actually said.
+- Before creating or expanding a ticket, check what is missing to make it actionable (for a work ticket: goal, inputs or data sources, technology choices, expected output, how "done" is judged). If anything important is missing, ask the user first, in one short round of questions, and wait for the answers.
+- Never invent requirements, scope, acceptance criteria, technology choices, priorities, labels, due dates or deadlines. Leave a field empty rather than filling it with an assumption.
+- Only if the user explicitly says to go ahead without answering, create the ticket with an "Open questions" section listing what is unknown, keep it in backlog, and say clearly which parts are open.
+- The same applies when updating a ticket: change only what the user asked to change.`,
   },
 );
 
@@ -88,7 +94,7 @@ tool('get_task', 'Full details of one task, including subtasks, comments and its
     return { ...slim(t), subtasks: t.subtasks.map(slim), comments: t.comments, history: store.listActivity({ entity_id: id, limit: 20 }) };
   }, readOnly);
 
-tool('add_tasks', 'Create one or more tasks (max 100), optionally with subtasks.',
+tool('add_tasks', 'Create one or more tasks (max 100), optionally with subtasks. Use only details the user stated; ask about anything important that is missing before calling this (see the server instructions: ask, don\'t guess).',
   { tasks: z.array(z.object({ ...TaskInput, subtasks: z.array(z.string()).optional() })).min(1).max(100) },
   ({ tasks }) => store.createTasks(tasks, ACTOR).map(slim));
 
@@ -102,7 +108,7 @@ tool('quick_add', 'Create a task from quick-add syntax, e.g. "Call mom tomorrow 
     }, ACTOR));
   });
 
-tool('update_task', 'Change fields of a task. Only the fields you pass are changed. Pass null to clear due_date, due_time, recurrence or deadline.',
+tool('update_task', 'Change fields of a task. Only change what the user asked for, and never add details they did not give. Only the fields you pass are changed. Pass null to clear due_date, due_time, recurrence or deadline.',
   {
     id: z.string(),
     content: z.string().optional(),
